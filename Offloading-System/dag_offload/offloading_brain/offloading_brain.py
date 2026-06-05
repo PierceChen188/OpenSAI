@@ -19,11 +19,13 @@ class OffloadingImpl():
     def direct_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo):
         idx = subtask_info.get_sub_task_direct_allocate_id()
         device_size = len(device_info_list)
-        if device_size > idx and idx > 0:
-            keys_list = list(device_info_list.keys())
-            return device_info_list[keys_list[idx]]
+        # 1-based 索引到“按 device_no 稳定排序”的设备列表。
+        # （旧实现是 0-based 且要求 idx>0，导致 idx=0 永远失效，且 dict 顺序不稳定、不可复现。）
+        if 1 <= idx <= device_size:
+            keys_list = sorted(device_info_list.keys())
+            return device_info_list[keys_list[idx - 1]]
         else:
-            logging.info("无指定的在线设备,为该任务随机分配一个设备...")
+            logging.info("directAllocationId 越界或<=0,为该任务随机分配一个设备...")
             return cls.random_strategy(device_info_list, subtask_info)
 
 

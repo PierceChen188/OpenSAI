@@ -34,15 +34,11 @@ class DeviceMonitor:
         # if not os.path.exists('../network/constant/local_client.yml'):
         # 物理机间的联调采用上面注释的方式
         # 多线程间的操作可以采用（1），但要注意device_no的存取不再依赖../network/constant/local_client.yml
+        # 直接使用进程内的全局设备号，不再经由 local_client.yml 文件中转。
+        # （旧实现把 device_no 写入一个固定路径的 yml 再读回——同机跑多台 device 自测时会
+        #  争抢同一个文件：某次读到正被写空的文件 -> yaml.load 返回 None -> config['device_no']
+        #  抛 TypeError -> 心跳线程崩溃 -> 该 device 连接断开被剔除 -> 只剩 1 台设备。）
         device_no = get_gl_device_no()
-        config = {'device_no': device_no}
-        # 使用基于本文件定位的绝对路径 + 自动建目录，确保从任意工作目录启动都能运行
-        os.makedirs(_CONSTANT_DIR, exist_ok=True)
-        with open(_LOCAL_CLIENT_YML, 'w', encoding='utf-8') as f:
-            yaml.dump(config, f)
-        with open(_LOCAL_CLIENT_YML, 'r', encoding='utf-8') as f:
-            config = yaml.load(f.read(), Loader=yaml.FullLoader)
-        device_no = config['device_no']
         # 获取主机名
         hostname = socket.gethostname()
         # 获取IP

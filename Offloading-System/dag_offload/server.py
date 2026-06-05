@@ -156,6 +156,47 @@ class UserServer:
             time.sleep(0.01)  # 指定间隔检查一次
 
     @classmethod
+    def _build_input_artifacts(cls, sub_task_info):
+        """数据面：为待派发的子任务，构造“需要从前驱设备拉取的产物”清单。
+
+        每项: {artifact_id, src_ip, src_port, pred_id}。
+        前驱用原始 DAG 的 beforeNodes（运行期 dependence_list 会被清空，不能用它）。
+        """
+        task_id = sub_task_info.get_task_id()
+        node_id = sub_task_info.get_sub_task_id()
+        artifacts = []
+        decoded = cls.all_task_decoded.get(task_id)
+        if not decoded:
+            return artifacts
+        predecessors = []
+        for node in decoded['dagData']['nodes']:
+            if node['id'] == node_id:
+                predecessors = node['form'].get('beforeNodes', []) or []
+                break
+        if not predecessors:
+            return artifacts
+        device_info_list = DeviceServiceImpl.read_device_info() or {}
+        for p in predecessors:
+            try:
+                pred_subtask = cls.all_task_dict[task_id]["queue"][p - 1]
+                pred_dev = pred_subtask.get_device_info()
+                if pred_dev is None:
+                    continue
+                dev = device_info_list.get(pred_dev.get_device_no())
+                if not dev or not dev.get('data_port'):
+                    logging.warning(f"前驱节点{p}的设备数据端点未知，暂无法构造产物拉取项")
+                    continue
+                artifacts.append({
+                    'artifact_id': f"{task_id}:{p}",
+                    'src_ip': dev.get('ip_address'),
+                    'src_port': dev.get('data_port'),
+                    'pred_id': p,
+                })
+            except Exception as e:
+                logging.error(f"构造前驱{p}产物拉取项失败: {e}")
+        return artifacts
+
+    @classmethod
     # 子线程2：处理 ready_subtask_queue 中的就绪子任务
     def handle_ready_subtasks(cls):
         logging.info('The thread for handling ready subtasks start...')
@@ -166,9 +207,8 @@ class UserServer:
 
                     sub_task_info = cls.ready_subtask_queue.get()
                     device_info = sub_task_info.get_device_info()
-                    # device_info = DeviceInfo()
-                    # device_info.set_device_from_dict(device_info_dict)
-                    # 在这里执行对就绪子任务的处理逻辑
+                    # 数据面：构造该子任务需要从前驱设备拉取的产物清单
+                    input_artifacts = cls._build_input_artifacts(sub_task_info)
 
                     if sub_task_info.get_sub_task_data_list() is not None:
                         sub_task_data_list = sub_task_info.get_sub_task_data_list()
@@ -196,6 +236,7 @@ class UserServer:
                                 'algo_name': sub_task_info.get_task_algorithm(),
                                 'algo_version': sub_task_info.get_sub_task_version(),
                                 'param_dict': sub_task_info.get_sub_task_input_param(),
+                                'input_artifacts': input_artifacts,
                                 'data_dict': data_dict
                             }
 
@@ -231,7 +272,8 @@ class UserServer:
                                 'device_no': device_info.get_device_no(),
                                 'algo_name': sub_task_info.get_task_algorithm(),
                                 'algo_version': sub_task_info.get_sub_task_version(),
-                                'param_dict': sub_task_info.get_sub_task_input_param()
+                                'param_dict': sub_task_info.get_sub_task_input_param(),
+                                'input_artifacts': input_artifacts
                             }
 
                             # 构建P2P消息
@@ -315,7 +357,10 @@ class UserServer:
         """处理所有的TCP连接"""
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 128000000)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 注意：不要在 Windows 上设 SO_REUSEADDR。Windows 的 SO_REUSEADDR 允许多个进程
+        # 同时绑定同一端口，导致客户端连接被不确定地分发到不同的 server 实例（曾导致注入器
+        # 连到“没有设备”的旧实例、任务不被处理）。去掉后，重复启动会直接报“端口被占用”，
+        # 问题立刻可见而不是静默路由错乱。
         server_socket.bind((HOST, PORT))
         server_socket.listen(5)
         logging.info(f'TCP Server on {HOST}:{PORT}...')

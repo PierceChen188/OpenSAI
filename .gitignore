@@ -162,6 +162,8 @@ Offloading-System/network/constant/local_client.yml
 # data-plane dev self-signed certs (regenerated on first use)
 dev_cert.pem
 dev_key.pem
+# data-plane runtime artifacts (transferred blobs)
+.artifacts/
 
 # ===== OpenSAI: v1.0 reference baseline (kept on disk with its own git history;
 # not tracked by the v1.1 repo — compare via: git diff --no-index opensai_1.0/Offloading-System Offloading-System) =====

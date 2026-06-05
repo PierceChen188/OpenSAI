@@ -16,3 +16,7 @@ _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATAPLANE_DIR = os.path.join(os.path.dirname(_CONFIG_DIR), 'network', 'dataplane')
 CERT_FILE = os.path.join(_DATAPLANE_DIR, 'dev_cert.pem')
 KEY_FILE = os.path.join(_DATAPLANE_DIR, 'dev_key.pem')
+
+# 本机产物存放目录。按数据端口隔离，便于“同机多 device 自测”互不冲突；可用环境变量覆盖。
+ARTIFACTS_DIR = os.environ.get('OPENSAI_ARTIFACTS_DIR') or os.path.abspath(
+    os.path.join('.artifacts', str(DATA_PORT)))

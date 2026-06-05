@@ -13,6 +13,9 @@ from config.network_config import HOST, PORT
 from device.device_monitor import DeviceMonitor, get_gl_device_no
 from device.implements.actuator_impl import ActuatorImpl
 from network.utils.network_utils import NetworkUtils
+from network.dataplane.quic_server import ArtifactServer
+from network.dataplane.quic_client import fetch_blob
+from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
 
 name = "DEVICE_" + get_gl_device_no()
 
@@ -21,6 +24,8 @@ class DeviceClient:
     # 添加容器管理器实例（支持容器化任务执行和复用）
     container_controller = ResourceControlInterface()
     logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
+    # 数据面：本机产物服务器（在 activate_client 中启动）
+    artifact_server = None
 
     @classmethod
     # def execute_task(cls, algorithm_name, param_dict, data_dict):
@@ -79,13 +84,42 @@ class DeviceClient:
         在独立线程中处理单个任务
         """
         try:
-            algorithm_name = "device.implements." + data_decode['msg']['algo_name']
+            msg = data_decode['msg']
+            task_id = msg['task_id']
+            node_id = msg['sub_task_id']
+            algorithm_name = "device.implements." + msg['algo_name']
+            param_dict = dict(msg.get('param_dict') or {})
+
+            # ---- 数据面：拉取前驱产物，注入 _artifact_in（pred_id -> 本地文件） ----
+            artifact_in = {}
+            for art in (msg.get('input_artifacts') or []):
+                pred_id = art.get('pred_id')
+                local = os.path.join(ARTIFACTS_DIR, f"{task_id}_{pred_id}.in.blob")
+                try:
+                    stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local)
+                    artifact_in[pred_id] = local
+                    logging.info(f"[dataplane] 拉取前驱产物 {art['artifact_id']} 自 "
+                                 f"{art['src_ip']}:{art['src_port']} "
+                                 f"({stats['bytes']} bytes, {stats['elapsed']:.3f}s)")
+                except Exception as e:
+                    logging.error(f"[dataplane] 拉取前驱产物失败 {art}: {e}")
+            if artifact_in:
+                param_dict['_artifact_in'] = artifact_in
+
+            # ---- 数据面：本节点产出路径，注入 _artifact_out ----
+            artifact_out = os.path.join(ARTIFACTS_DIR, f"{task_id}_{node_id}.blob")
+            param_dict['_artifact_out'] = artifact_out
+
             # 执行算法
             result_1 = cls.execute_task(
-                algorithm_name, 
-                data_decode['msg']['param_dict'],
-                data_decode['msg'].get('data_dict', {})
+                algorithm_name,
+                param_dict,
+                msg.get('data_dict', {})
             )
+
+            # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
+            if cls.artifact_server is not None and os.path.exists(artifact_out):
+                cls.artifact_server.register(f"{task_id}:{node_id}", artifact_out)
 
             logging.info(f"任务计算结果： {result_1}")
             
@@ -126,7 +160,8 @@ class DeviceClient:
         接受来自server分发的任务，并调用相关函数进行处理
         '''
         # 发送设备初始化消息，格式化为JSON以便服务器识别
-        init_msg = {'heart_beat': True, 'device_name': name, 'device_no': get_gl_device_no()}
+        init_msg = {'heart_beat': True, 'device_name': name, 'device_no': get_gl_device_no(),
+                    'data_port': DATA_PORT}
         sock.send(json.dumps(init_msg).encode('utf-8'))  # TCP: sendto -> send
         logging.info(f"Sent device initialization message to {addr}")
 
@@ -191,6 +226,7 @@ class DeviceClient:
         # 确保心跳包中包含heart_beat标识和device_no字段
         device_info['heart_beat'] = True
         device_info['device_no'] = get_gl_device_no()
+        device_info['data_port'] = DATA_PORT  # 数据面端口，供 server 告知后继“去哪拉产物”
         print(device_info)
 
         while True:
@@ -241,6 +277,12 @@ class DeviceClient:
         '''
           主函数执行方法，通过多线程来实现多个客户端之间的通信
         '''
+        # 启动数据面产物服务器（设备间大块数据直传 / QUIC）
+        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+        cls.artifact_server = ArtifactServer(port=DATA_PORT)
+        cls.artifact_server.start()
+        logging.info(f"数据面 ArtifactServer 已启动: 端口 {DATA_PORT}, 产物目录 {ARTIFACTS_DIR}")
+
         # 创建TCP socket而不是使用CLIENT_SOCK
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # TCP
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 128000000)  # 保持与原代码一致的缓冲区设置

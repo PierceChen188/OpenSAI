@@ -52,6 +52,14 @@ Stop-OpenSaiPython 'server.py'
 Stop-OpenSaiPython 'device_client.py'
 if ($WithWeb) { Stop-OpenSaiPython 'user_client.py' }
 Start-Sleep -Seconds 2
+# wait for port 8888 to be free before starting (server no longer sets SO_REUSEADDR,
+# so a duplicate bind now errors loudly instead of silently mis-routing connections)
+for ($i = 0; $i -lt 10; $i++) {
+    $owner = (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+    if (-not $owner) { break }
+    Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+}
 
 $srvPid = Start-OpenSaiPython 'server.py' 'server'
 Write-Host "server.py     -> PID $srvPid" -ForegroundColor Green

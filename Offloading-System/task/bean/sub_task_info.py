@@ -76,6 +76,9 @@ class SubTaskInfo:
         self.__device_info = device_info
         self.__subtask_delay = subtask_delay
         self.__sub_task_input_param = sub_task_input_param
+        # 修复：原 set_sub_task_info 接收了 sub_task_direct_allocate_id 形参却从未赋值，
+        # 导致 directAllocationId 永远是 -1、卸载始终走随机分配（两个节点可能落到同一台设备）。
+        self.__sub_task_direct_allocate_id = sub_task_direct_allocate_id
 
     def set_sub_task_info_by_dict(self, sub_task_info_dict: dict):
         self.__task_id = sub_task_info_dict['task_id']
@@ -136,8 +139,11 @@ class SubTaskInfo:
             sub_task_result_info=subtask["result"]["taskResultInfo"],
             sub_task_status=subtask["result"]["status"],
             sub_task_count=1,
-            run_before_list=subtask["form"]["afterNodes"],      # 后继
-            dependence_list=subtask["form"]["beforeNodes"],     # 前驱
+            # 用 list(...) 拷贝，避免与原始 DAG 的 beforeNodes/afterNodes 共享同一个列表对象：
+            # 运行期依赖消解会 deps.remove()，若共享会把 all_task_decoded 里的 beforeNodes 也清空，
+            # 导致数据面拿不到前驱（input_artifacts 为空）。
+            run_before_list=list(subtask["form"]["afterNodes"]),      # 后继
+            dependence_list=list(subtask["form"]["beforeNodes"]),     # 前驱
             device_info=None,
             subtask_delay=-1,
             sub_task_input_param=task_input_info,
