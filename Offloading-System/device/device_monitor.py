@@ -10,6 +10,12 @@ import yaml
 
 GL_DEVICE_NO = str(uuid.uuid4())
 
+# CWD 无关的本地配置路径：始终相对于本文件定位 Offloading-System/network/constant/，
+# 避免依赖“必须从仓库根目录启动”（旧代码用相对路径 'Offloading-System/network/constant/...'，
+# 只有当工作目录恰好是仓库根时才找得到）。
+_CONSTANT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'network', 'constant')
+_LOCAL_CLIENT_YML = os.path.join(_CONSTANT_DIR, 'local_client.yml')
+
 
 def get_gl_device_no():
     return GL_DEVICE_NO
@@ -30,12 +36,12 @@ class DeviceMonitor:
         # 多线程间的操作可以采用（1），但要注意device_no的存取不再依赖../network/constant/local_client.yml
         device_no = get_gl_device_no()
         config = {'device_no': device_no}
-        file = open('Offloading-System/network/constant/local_client.yml', 'w', encoding='utf-8')  # 1
-        yaml.dump(config, file)
-        file.close()
-        file = open('Offloading-System/network/constant/local_client.yml', 'r', encoding='utf-8')
-        config = yaml.load(file.read(), Loader=yaml.FullLoader)
-        file.close()
+        # 使用基于本文件定位的绝对路径 + 自动建目录，确保从任意工作目录启动都能运行
+        os.makedirs(_CONSTANT_DIR, exist_ok=True)
+        with open(_LOCAL_CLIENT_YML, 'w', encoding='utf-8') as f:
+            yaml.dump(config, f)
+        with open(_LOCAL_CLIENT_YML, 'r', encoding='utf-8') as f:
+            config = yaml.load(f.read(), Loader=yaml.FullLoader)
         device_no = config['device_no']
         # 获取主机名
         hostname = socket.gethostname()
