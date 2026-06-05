@@ -328,6 +328,7 @@ class UserServer:
         global user_dict, task_dict, data_lock
 
         client_id = None  # 可能是用户名或设备ID
+        is_device = False  # 该连接是否为边缘设备（用于断开时从Redis在线列表中移除）
 
         try:
             while True:
@@ -352,6 +353,7 @@ class UserServer:
                             device_no = data_decode.get('device_no')
                             if device_no:
                                 client_id = device_no
+                                is_device = True
                                 cls.client_sockets[device_no] = client_sock
                                 logging.info(f"已记录设备 {device_no} 的连接")
 
@@ -550,6 +552,11 @@ class UserServer:
                 del cls.client_sockets[client_id]
                 logging.info(f"已移除客户端连接: {client_id}")
 
+            # 设备断开：从Redis在线列表中移除，避免随机卸载决策选中已下线设备
+            # （否则离线设备会在 DEVICE_ONLINE_SET 中残留 TTL 24h，导致任务静默丢失）
+            if is_device and client_id:
+                DeviceServiceImpl.remove_device(client_id)
+
             # 如果是用户端，也从user_dict中删除
             for username, addr in list(user_dict.items()):
                 if addr == client_addr:
@@ -580,7 +587,9 @@ class UserServer:
                 device_name = DeviceServiceImpl.device_map[device_id] if "deviceId" in subtask_result["result"] else "Unknown"
             subtask_result["result"]["deviceId"] = device_name
             subtask_results.append(subtask_result)
-        start_time = float(task_id[12:])
+        # 使用入队时已保存的创建时间戳，而不是用硬编码的 task_id[12:] 切片解析
+        # （旧写法假设任务名固定为12字符，任务名长度不同时会算出错误的 finishedTime）。
+        start_time = cls.all_task_dict[task_id]["time"]
         result_dict = {
             "dagResult": {"taskName": task_id, "finishedTime": time.time() - start_time, "nodes": subtask_results}}
         return result_dict

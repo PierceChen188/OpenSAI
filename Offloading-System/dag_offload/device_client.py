@@ -60,10 +60,12 @@ class DeviceClient:
                 logging.info(f"容器任务执行成功: {task_result}")
                 result = task_result
             else:
-                # 任务执行失败
+                # 容器执行失败（如本机无 Docker / 镜像不可用）——按设计降级为本地直接执行。
+                # 注意：start_task 会吞掉自身异常并返回 status!=1，因此这里不能只靠 except 兜底，
+                # 必须在 status!=1 时显式降级，否则无 Docker 时每个任务都会返回失败串。
                 error_msg = result_dict.get('result', {}).get('taskResultInfo', '任务执行失败')
-                logging.error(f"容器任务执行失败: {error_msg}")
-                result = f"任务执行失败: {error_msg}"
+                logging.warning(f"容器任务执行失败({error_msg})，降级使用本地直接执行")
+                result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
 
             return result
             

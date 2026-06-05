@@ -195,3 +195,16 @@ class DeviceServiceImpl(DeviceService):
         REDIS_TOOLS.delete(ComRedisKeyConstant.DEVICE_ONLINE_MEMORY_SET)
 
         logging.info("Redis 缓存清空完成！")
+
+    @classmethod
+    def remove_device(cls, device_no: str):
+        """设备断开连接时，将其从在线集合与缓存中移除。
+
+        保留 device_map（设备号->设备名）以便历史任务结果仍能回显设备名。
+        """
+        try:
+            REDIS_TOOLS.set_remove(ComRedisKeyConstant.DEVICE_ONLINE_SET, device_no)
+            REDIS_TOOLS.delete(ComRedisKeyConstant.DEVICE_ONLINE_PREFIX + device_no)
+            logging.info(f"设备 {device_no} 已从在线列表移除（连接断开）")
+        except Exception as e:
+            logging.error(f"移除离线设备 {device_no} 失败: {e}")

@@ -1,13 +1,37 @@
-Flask~=2.0.3
-Jinja2~=3.1.1
-redis~=5.0.0
-psutil~=5.9.5
-PyYAML~=6.0
-docker~=6.1.3
-opencv-python
-torch
-torchvision
-torchaudio
-numpy
-pillow
-tqdm
+# OpenSAI v1.1 — CORE runtime dependencies (verified on Python 3.13, Windows).
+# Install:  python -m pip install -r requirements.txt
+#
+# (The original pinned Flask~=2.0.3 etc. for Python 3.9; these versions are the
+#  3.13-compatible set actually verified to run. See git tag v1.1-inherited for
+#  the original file. Dockerfile base image bumped to python:3.13-slim to match.)
+
+# --- Redis client: MUST stay on the 5.0.x line ---
+# redis-py >= 6 negotiates RESP3 with a `HELLO` command that Redis server 5.x
+# rejects ("unknown command HELLO"). Because RedisUtils swallows RedisError,
+# every cache op then fails *silently* (devices never register, tasks never
+# dispatch). Keep this pin compatible with your Redis server version.
+redis==5.0.8
+
+# --- Web frontend (dag_offload/user_client.py) ---
+# NOTE: flask-cors was MISSING from the original requirements even though
+# user_client.py imports it (`from flask_cors import CORS`).
+Flask==3.1.3
+flask-cors==6.0.2
+
+# --- Device monitoring / resource limiting ---
+psutil==7.2.2
+PyYAML==6.0.3
+
+# --- Imported transitively at startup ---
+# network/implements/msg_transfer_tool_impl.py does `import cv2` / `import numpy`,
+# and both server.py and device_client.py import it, so these are required even
+# for pure-Python tasks (Pi/Sleep/Random).
+opencv-python==4.13.0.92
+numpy==2.4.6
+
+# Heavy ML deps (torch/torchvision/tqdm) for the CNN/Train algorithms are
+# OPTIONAL and live in requirements-ml.txt — install only if you need them.
+#
+# Docker is NOT a pip dependency: ResourceControlInterface shells out to the
+# `docker` CLI. Install Docker separately only if you want container execution;
+# without it, device_client falls back to local execution (see the fallback fix).

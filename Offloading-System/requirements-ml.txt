@@ -1,0 +1,19 @@
+# OpenSAI v1.1 — OPTIONAL machine-learning dependencies.
+#
+# Only needed to run the deep-learning algorithm nodes:
+#   device/implements/Algorithm_CNN.py
+#   device/implements/Algorithm_NEW_CNN.py
+#   device/implements/Algorithm_Train.py
+# These also require the CIFAR-10 dataset (git-ignored — download separately
+# into Offloading-System/data/).
+#
+# Install AFTER the core deps:
+#   python -m pip install -r requirements.txt
+#   python -m pip install -r requirements-ml.txt
+#
+# torch is left unpinned so pip resolves a wheel matching your Python/OS/CUDA.
+# For a specific build (e.g. CUDA), see https://pytorch.org/get-started/locally/
+torch
+torchvision
+tqdm
+pillow
