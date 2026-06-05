@@ -1,6 +1,5 @@
 import json
 import subprocess
-import tempfile
 import os
 import time
 import logging
@@ -606,7 +605,6 @@ except Exception as e:
             data_dict = {}
 
         # 将字典转换为字符串（用于脚本生成）
-        import json
         param_dict_str = json.dumps(param_dict)
         data_dict_str = json.dumps(data_dict)
 

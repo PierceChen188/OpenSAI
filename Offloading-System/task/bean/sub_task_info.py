@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, TYPE_CHECKING
 
 from config.sub_task_status import SubTaskStatus
 from result.bean.result_info import ResultInfo
 from task.bean.algorithm_info import AlgorithmInfo
 from task.bean.data_info import DataInfo
+
+if TYPE_CHECKING:
+    # 仅用于类型注解；本文件已 from __future__ import annotations，注解为惰性字符串，
+    # 不会在运行时求值，因而避免潜在的循环导入。
+    from device.bean.devce_info import DeviceInfo
 
 
 class SubTaskInfo:

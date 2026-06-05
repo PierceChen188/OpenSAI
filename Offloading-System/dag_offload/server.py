@@ -425,7 +425,6 @@ class UserServer:
                         elif 'dag_subtask_rsp' in data_decode:
                             task_id = data_decode['msg']['task_id']
                             subtask_id = data_decode['msg']['sub_task_id']
-                            cost_time = time.time() - cls.all_task_dict[task_id]["time"]
                             subtask_res = data_decode['msg']['result']
 
                             logging.info(f"DAG任务{task_id}的子任务{subtask_id}完成,结果报文：{data_decode}")

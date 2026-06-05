@@ -4,7 +4,6 @@ import threading
 import time
 import socket
 import sys
-from multiprocessing import Process
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 将上一级目录添加到Python的模块搜索路径
 # 添加容器管理接口导入
@@ -52,7 +51,6 @@ class DeviceClient:
             )
             
             # 提取执行结果
-            container_id = result_dict['result'].get('container_id')
             if result_dict.get('result', {}).get('status') == 1:
                 # 任务执行成功
                 task_result = result_dict['result'].get('taskResultInfo', '任务执行完成')

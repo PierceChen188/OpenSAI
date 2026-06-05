@@ -5,7 +5,6 @@ import socket
 import threading
 import json
 import sys
-import time
 import datetime
 import queue
 import os
@@ -18,13 +17,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from config.network_config import HOST, PORT
-from config.logging_config import LOG_FORMAT
-from config.sub_task_status import SubTaskStatus
-from device.bean.devce_info import DeviceInfo
 from network.utils.network_utils import NetworkUtils
-from predis.implements.device_service_impl import DeviceServiceImpl
-from task.bean.sub_task_info import SubTaskInfo
-from task.interfaces.algorithm_transmission import AlgorithmTransmission
 
 # 全局变量，用于存储从请求中获取的dag数据
 data_dag = None
@@ -227,7 +220,7 @@ def dag_receive_data():
 def upload_py_file():
     """
     接收前端上传的 .py 文件，并保存到后端指定目录。
-    路径: OffloadingSystem\Offloading-System\device\implements
+    路径: Offloading-System/device/implements
     """
     # 支持 CORS 预检请求
     if request.method == 'OPTIONS':

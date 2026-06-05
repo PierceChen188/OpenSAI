@@ -1,6 +1,5 @@
 __all__ = ['Algorithm_Random']
 
-import time
 import random
 
 class Algorithm_Random:

@@ -1,7 +1,6 @@
 __all__ = ['Algorithm_Sleep_1']
 
 import time
-import random
 
 class Algorithm_Sleep_1:
     def __init__(self, param_dict, data_dict):
