@@ -22,6 +22,10 @@ flask-cors==6.0.2
 psutil==7.2.2
 PyYAML==6.0.3
 
+# --- Data plane: device-to-device bulk transfer over QUIC (Phase 2a) ---
+# Used by network/dataplane/ (ArtifactServer + fetch_blob). Pulls in `cryptography`.
+aioquic==1.3.0
+
 # NOTE: opencv-python / numpy used to be required here because the 3 entry points
 # imported network/implements/msg_transfer_tool_impl.py (which does `import cv2`).
 # Those imports were VESTIGIAL (never called) and were removed in cleanup batch B,
