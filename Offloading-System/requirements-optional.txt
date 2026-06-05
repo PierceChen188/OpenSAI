@@ -1,0 +1,10 @@
+# OpenSAI v1.1 — OPTIONAL dependencies for the P2P messaging API / demos.
+#
+# NOT needed by the core (server.py / device_client.py / user_client.py).
+# Install only if you use:
+#   - network/implements/msg_transfer_tool_impl.py  (P2P / big-data messaging)
+#   - dag_offload/single_client.py, dag_offload/task_form.py  (standalone demos)
+#
+#   python -m pip install -r requirements-optional.txt
+opencv-python==4.13.0.92
+numpy==2.4.6

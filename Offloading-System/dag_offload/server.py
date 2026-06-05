@@ -16,7 +16,6 @@ from device.bean.devce_info import DeviceInfo
 from network.utils.network_utils import NetworkUtils
 from network.protocol.packet_protocol_conversion import PacketProtocolConversion
 from predis.implements.device_service_impl import DeviceServiceImpl
-from task.implements.algorithm_transmission_impl import AlgorithmTransmissionImpl
 from device.implements.actuator_impl import ActuatorImpl
 from task.bean.sub_task_info import SubTaskInfo
 from offloading_brain.offloading_brain import OffloadingImpl
@@ -61,9 +60,15 @@ class UserServer:
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
         else:
             device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
+        if not device_dict:
+            # 当前无在线设备：不分配，保持子任务 READY 等待下一轮重试。
+            # （旧代码会直接 set_device_from_dict(None) 抛 TypeError，进而杀死整个卸载线程。）
+            logging.warning('无可用在线设备，子任务暂缓卸载，等待下一轮重试...')
+            return False
         device_info = DeviceInfo()
         device_info.set_device_from_dict(device_dict)
         subtask.set_device_info(device_info)
+        return True
 
     @classmethod
     #保存历史记录到redis中
@@ -134,17 +139,20 @@ class UserServer:
         logging.info('The thread for offloading making process start...')
         while True:
 
-            for task_name, task_info in cls.all_task_dict.items():
-                # print(task_name, task_info)
-                for subtask in task_info["queue"]:
-                    if subtask.get_sub_task_status() == SubTaskStatus.READY.value:
-                        with cls.data_lock:
-                            # 对subtask做卸载决策(目前启用随机卸载决策）
-                            cls.offloading_strategy(subtask)
-
-                            # 将就绪子任务放入 ready_subtask_queue
-                            cls.ready_subtask_queue.put(subtask)
-                            subtask.set_sub_task_status(SubTaskStatus.WORK.value)
+            try:
+                for task_name, task_info in cls.all_task_dict.items():
+                    # print(task_name, task_info)
+                    for subtask in task_info["queue"]:
+                        if subtask.get_sub_task_status() == SubTaskStatus.READY.value:
+                            with cls.data_lock:
+                                # 对subtask做卸载决策(目前启用随机卸载决策）
+                                # 仅在成功分配到设备后才入队并置为 WORK；否则保持 READY 下轮重试
+                                if cls.offloading_strategy(subtask):
+                                    cls.ready_subtask_queue.put(subtask)
+                                    subtask.set_sub_task_status(SubTaskStatus.WORK.value)
+            except Exception as e:
+                # 防御性兜底：单个子任务/单轮的异常不应杀死整个卸载线程
+                logging.error(f"卸载决策线程异常（已忽略并继续）: {e}")
             time.sleep(0.01)  # 指定间隔检查一次
 
     @classmethod

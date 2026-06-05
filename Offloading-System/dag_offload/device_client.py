@@ -13,7 +13,6 @@ from config.logging_config import LOG_FORMAT
 from config.network_config import HOST, PORT
 from device.device_monitor import DeviceMonitor, get_gl_device_no
 from device.implements.actuator_impl import ActuatorImpl
-from network.implements.msg_transfer_tool_impl import MsgTransferToolImpl
 from network.utils.network_utils import NetworkUtils
 
 name = "DEVICE_" + get_gl_device_no()

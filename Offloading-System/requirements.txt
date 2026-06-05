@@ -22,14 +22,14 @@ flask-cors==6.0.2
 psutil==7.2.2
 PyYAML==6.0.3
 
-# --- Imported transitively at startup ---
-# network/implements/msg_transfer_tool_impl.py does `import cv2` / `import numpy`,
-# and both server.py and device_client.py import it, so these are required even
-# for pure-Python tasks (Pi/Sleep/Random).
-opencv-python==4.13.0.92
-numpy==2.4.6
-
-# Heavy ML deps (torch/torchvision/tqdm) for the CNN/Train algorithms are
+# NOTE: opencv-python / numpy used to be required here because the 3 entry points
+# imported network/implements/msg_transfer_tool_impl.py (which does `import cv2`).
+# Those imports were VESTIGIAL (never called) and were removed in cleanup batch B,
+# so the core no longer needs opencv/numpy. They are now optional — see
+# requirements-optional.txt (only needed for the P2P messaging API and the
+# single_client.py / task_form.py demos).
+#
+# Heavy ML deps (torch/torchvision/tqdm) for the CNN/Train algorithms are also
 # OPTIONAL and live in requirements-ml.txt — install only if you need them.
 #
 # Docker is NOT a pip dependency: ResourceControlInterface shells out to the

@@ -21,12 +21,10 @@ from config.network_config import HOST, PORT
 from config.logging_config import LOG_FORMAT
 from config.sub_task_status import SubTaskStatus
 from device.bean.devce_info import DeviceInfo
-from network.implements.msg_transfer_tool_impl import MsgTransferToolImpl
 from network.utils.network_utils import NetworkUtils
 from predis.implements.device_service_impl import DeviceServiceImpl
 from task.bean.sub_task_info import SubTaskInfo
 from task.interfaces.algorithm_transmission import AlgorithmTransmission
-from task.implements.algorithm_transmission_impl import AlgorithmTransmissionImpl
 
 # 全局变量，用于存储从请求中获取的dag数据
 data_dag = None
