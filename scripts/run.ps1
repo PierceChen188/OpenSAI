@@ -22,9 +22,11 @@ if (-not (Test-Path $redisExe)) { Write-Host "Redis missing — run scripts\setu
 if (-not (Test-Path $logs))     { New-Item -ItemType Directory -Path $logs | Out-Null }
 
 function Stop-OpenSaiPython([string]$pattern) {
+    # Tree-kill (/T): the device spawns a process pool (worker + manager children) that
+    # a single Stop-Process would orphan; taskkill /T removes the whole subtree.
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
         Where-Object { $_.CommandLine -like "*$pattern*" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { cmd /c "taskkill /F /T /PID $($_.ProcessId) >nul 2>nul" }
 }
 
 function Start-OpenSaiPython([string]$script, [string]$tag) {
@@ -49,6 +51,7 @@ Write-Host "Redis: PONG" -ForegroundColor Green
 # 2) (re)start server + device ------------------------------------------
 Write-Host "Stopping any existing server/device..." -ForegroundColor Yellow
 Stop-OpenSaiPython 'server.py'
+Stop-OpenSaiPython 'run_device.py'
 Stop-OpenSaiPython 'device_client.py'
 if ($WithWeb) { Stop-OpenSaiPython 'user_client.py' }
 Start-Sleep -Seconds 2
@@ -64,9 +67,9 @@ for ($i = 0; $i -lt 10; $i++) {
 $srvPid = Start-OpenSaiPython 'server.py' 'server'
 Write-Host "server.py     -> PID $srvPid" -ForegroundColor Green
 Start-Sleep -Seconds 3
-$devPid = Start-OpenSaiPython 'device_client.py' 'device'
-Write-Host "device_client -> PID $devPid" -ForegroundColor Green
-Start-Sleep -Seconds 5
+$devPid = Start-OpenSaiPython 'run_device.py' 'device'
+Write-Host "device (run_device) -> PID $devPid" -ForegroundColor Green
+Start-Sleep -Seconds 8
 
 if ($WithWeb) {
     $webPid = Start-OpenSaiPython 'user_client.py' 'user'

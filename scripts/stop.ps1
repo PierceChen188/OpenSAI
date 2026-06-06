@@ -13,12 +13,14 @@ function Stop-OpenSaiPython([string]$pattern) {
     $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
         Where-Object { $_.CommandLine -like "*$pattern*" }
     foreach ($p in $procs) {
-        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        # Tree-kill (/T): also removes the device's process-pool worker/manager children.
+        cmd /c "taskkill /F /T /PID $($p.ProcessId) >nul 2>nul"
         Write-Host "stopped $pattern (PID $($p.ProcessId))" -ForegroundColor Yellow
     }
 }
 
 Stop-OpenSaiPython 'dag_offload\server.py'
+Stop-OpenSaiPython 'run_device.py'
 Stop-OpenSaiPython 'device_client.py'
 Stop-OpenSaiPython 'user_client.py'
 Stop-OpenSaiPython 'inject_dag.py'
