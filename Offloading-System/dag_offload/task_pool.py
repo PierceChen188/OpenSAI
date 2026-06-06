@@ -16,20 +16,86 @@
 import concurrent.futures as _cf
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+
+_JOB_HANDLE = None   # 保活 Windows 作业对象句柄（关闭会解除限制），进程退出时自动释放
+
+
+def _win_set_process_memory_limit(mem_bytes):
+    """Windows 内存硬上限：把当前进程加入一个设了 ProcessMemoryLimit 的作业对象(Job Object)，
+    超过该提交内存的分配将失败(Python 抛 MemoryError)。返回是否设置成功。"""
+    global _JOB_HANDLE
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                'ReadOperationCount', 'WriteOperationCount', 'OtherOperationCount',
+                'ReadTransferCount', 'WriteTransferCount', 'OtherTransferCount')]
+
+        class BASIC(ctypes.Structure):
+            _fields_ = [('PerProcessUserTimeLimit', ctypes.c_int64),
+                        ('PerJobUserTimeLimit', ctypes.c_int64),
+                        ('LimitFlags', wintypes.DWORD),
+                        ('MinimumWorkingSetSize', ctypes.c_size_t),
+                        ('MaximumWorkingSetSize', ctypes.c_size_t),
+                        ('ActiveProcessLimit', wintypes.DWORD),
+                        ('Affinity', ctypes.c_size_t),
+                        ('PriorityClass', wintypes.DWORD),
+                        ('SchedulingClass', wintypes.DWORD)]
+
+        class EXT(ctypes.Structure):
+            _fields_ = [('BasicLimitInformation', BASIC), ('IoInfo', IO_COUNTERS),
+                        ('ProcessMemoryLimit', ctypes.c_size_t),
+                        ('JobMemoryLimit', ctypes.c_size_t),
+                        ('PeakProcessMemoryUsed', ctypes.c_size_t),
+                        ('PeakJobMemoryUsed', ctypes.c_size_t)]
+
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+        JobObjectExtendedLimitInformation = 9
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.restype = wintypes.BOOL
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        k32.AssignProcessToJobObject.restype = wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+
+        h = k32.CreateJobObjectW(None, None)
+        if not h:
+            return False
+        info = EXT()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        info.ProcessMemoryLimit = int(mem_bytes)
+        if not k32.SetInformationJobObject(h, JobObjectExtendedLimitInformation,
+                                           ctypes.byref(info), ctypes.sizeof(info)):
+            return False
+        if not k32.AssignProcessToJobObject(h, k32.GetCurrentProcess()):
+            return False
+        _JOB_HANDLE = h   # 句柄保活
+        return True
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"[pool] Windows 内存上限设置失败: {e}")
+        return False
 
 
 def _worker_init():
     """每个 worker 进程启动时执行一次：（可选）内存上限 + 预热算法。绑核由主进程事后完成。"""
     mem_mb = int(os.environ.get('OPENSAI_TASK_MEM_MB', '0') or 0)
     if mem_mb > 0:
-        try:
-            import resource  # Unix-only
-            cap = mem_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
-        except Exception:
-            pass
+        cap = mem_mb * 1024 * 1024
+        if sys.platform == 'win32':
+            _win_set_process_memory_limit(cap)        # 作业对象硬上限
+        else:
+            try:
+                import resource  # Unix-only
+                resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+            except Exception:
+                pass
     # 每个 worker 各自在自己的主线程导入重型 C 扩展(numpy/torch)，避免首次在任务子线程导入死锁。
     try:
         from device.implements.actuator_impl import ActuatorImpl

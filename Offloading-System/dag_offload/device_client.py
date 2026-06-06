@@ -17,6 +17,7 @@ from network.dataplane.quic_server import ArtifactServer
 from network.dataplane.quic_client import fetch_blob
 from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
 from dag_offload.task_pool import build_pool, run_task
+from concurrent.futures.process import BrokenProcessPool
 
 name = "DEVICE_" + get_gl_device_no()
 
@@ -146,9 +147,15 @@ class DeviceClient:
             if cls.pool is not None:
                 try:
                     result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
-                except Exception as e:
-                    logging.error(f"[pool] 池内执行失败，回退本地执行: {e}")
+                except BrokenProcessPool as e:
+                    # 进程池本身坏了（基础设施问题）-> 回退主进程内执行，保证仍能出结果。
+                    logging.error(f"[pool] 进程池损坏，回退本地执行: {e}")
                     result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
+                except Exception as e:
+                    # 任务自身异常（如超出内存上限 MemoryError、算法报错、超时）：按失败返回，
+                    # 不绕过资源限制改用无限制的本地执行（否则内存硬上限就形同虚设）。
+                    logging.error(f"[pool] 任务执行异常: {type(e).__name__}: {e}")
+                    result_1 = f"ERROR: {type(e).__name__}: {e}"
             else:
                 result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
 
