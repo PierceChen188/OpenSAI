@@ -137,10 +137,31 @@ def test_fanin():
     return True, f'2 inputs fused from {d1} & {d2}'
 
 
+def test_locality():
+    # Unpinned (directAllocationId=-1) chain. T3.1 locality-aware placement should
+    # co-locate the consumer with the producer's data (avoid a cross-device transfer).
+    res = submit_dag(_dag('t_locality', [
+        _node(1, 'Producer', 'Algorithm_ProduceBlob', [], [2], -1, {'size_mb': 1}),
+        _node(2, 'Consumer', 'Algorithm_ConsumeBlob', [1], [], -1),
+    ]))
+    if not res:
+        return False, 'no dagResult'
+    p, c = _get(res, 'Producer'), _get(res, 'Consumer')
+    psha, cinfo = _sha(p.get('ResultInfo')), str(c.get('ResultInfo'))
+    pdev = p.get('result', {}).get('deviceId')
+    cdev = c.get('result', {}).get('deviceId')
+    if not psha or psha not in cinfo:
+        return False, f'consumer missing producer sha: p={psha} c={cinfo[:60]}'
+    if pdev != cdev:
+        return False, f'not co-located: producer@{pdev} consumer@{cdev} (locality should co-locate)'
+    return True, f'co-located on {pdev} (locality avoided a cross-device transfer)'
+
+
 TESTS = [
     ('basic DAG (Pi->Sleep)', test_basic),
     ('cross-device data plane', test_crossdevice),
     ('fan-in (2 producers -> fusion)', test_fanin),
+    ('locality placement (co-locate dependent)', test_locality),
 ]
 
 

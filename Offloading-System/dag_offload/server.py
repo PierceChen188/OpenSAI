@@ -40,6 +40,11 @@ class UserServer:
     # TCP客户端连接列表 - 用于存储TCP连接
     client_sockets = {}
 
+    # T2.1 预留账本：device_no -> 已放置但尚未完成的子任务数。放置即 +1、完成即 -1。
+    # 让放置决策按「真实负载 + 已承诺」选设备，避免把任务都堆到同一台“看起来空闲”的机器（防超卖）。
+    # 由 data_lock 保护（offloading_strategy 与 dag_subtask_rsp 处理均在该锁下）。
+    reservations = {}
+
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
         task_dict = cls.all_task_dict[task_id]
@@ -57,9 +62,13 @@ class UserServer:
         logging.info('making offloading strategy for subtask')
         device_info_list = DeviceServiceImpl.read_device_info()
         if subtask.get_sub_task_direct_allocate_id() != -1:
+            # 手动指定（directAllocationId>0）：保持原行为不变。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
         else:
-            device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
+            # T3.1 位置/资源感知放置（替换原 random）：传入前驱所在设备 + 预留账本。
+            pred_devices = cls._predecessor_devices(subtask)
+            device_dict = OffloadingImpl.locality_strategy(
+                device_info_list, subtask, pred_devices, cls.reservations)
         if not device_dict:
             # 当前无在线设备：不分配，保持子任务 READY 等待下一轮重试。
             # （旧代码会直接 set_device_from_dict(None) 抛 TypeError，进而杀死整个卸载线程。）
@@ -68,7 +77,36 @@ class UserServer:
         device_info = DeviceInfo()
         device_info.set_device_from_dict(device_dict)
         subtask.set_device_info(device_info)
+        # T2.1 占用即记账（放置成功 -> 该设备预留 +1），完成时在 dag_subtask_rsp 释放。
+        dno = device_info.get_device_no()
+        if dno:
+            cls.reservations[dno] = cls.reservations.get(dno, 0) + 1
         return True
+
+    @classmethod
+    def _predecessor_devices(cls, sub_task_info):
+        """返回该子任务各前驱产出所在的 device_no 列表（未知为 None）。
+
+        前驱用原始 DAG 的 beforeNodes；前驱产出在哪台机 = 该前驱子任务被放置到的设备
+        （运行期已通过 set_device_info 记录）。这就是 T2.2「数据位置追踪」的来源。"""
+        task_id = sub_task_info.get_task_id()
+        node_id = sub_task_info.get_sub_task_id()
+        decoded = cls.all_task_decoded.get(task_id)
+        devs = []
+        if not decoded:
+            return devs
+        preds = []
+        for node in decoded['dagData']['nodes']:
+            if node['id'] == node_id:
+                preds = node['form'].get('beforeNodes', []) or []
+                break
+        for p in preds:
+            try:
+                pred_dev = cls.all_task_dict[task_id]["queue"][p - 1].get_device_info()
+                devs.append(pred_dev.get_device_no() if pred_dev else None)
+            except Exception:
+                devs.append(None)
+        return devs
 
     @classmethod
     #保存历史记录到redis中
@@ -480,6 +518,12 @@ class UserServer:
                                     fin_subtask = cls.all_task_dict[task_id]["queue"][subtask_id - 1]
                                     fin_subtask = cls.mark_sub_task_status(fin_subtask)
                                     cls.all_task_dict[task_id]["queue"][subtask_id - 1] = fin_subtask
+
+                                    # T2.1 子任务完成 -> 释放它在所属设备上的预留。
+                                    _fdev = fin_subtask.get_device_info()
+                                    _fno = _fdev.get_device_no() if _fdev else None
+                                    if _fno and cls.reservations.get(_fno):
+                                        cls.reservations[_fno] = max(0, cls.reservations[_fno] - 1)
 
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成
