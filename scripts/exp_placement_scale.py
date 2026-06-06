@@ -139,19 +139,22 @@ def avg(rows, i):
 def main():
     print(f"\nDAG: {len(SPECS)} nodes, {len(EDGES)} edges, {N_SENSORS} sensors, fan={FAN}; "
           f"{N_DEVICES} devices; {TRIALS} trials/cond", flush=True)
-    print(f"\n#### Phase A - smart vs random ####", flush=True)
+    modes = ('random', 'smart', 'plan')
+    print(f"\n#### Phase A - random vs smart vs plan ####", flush=True)
     a = {}
-    for mode in ('random', 'smart'):
+    for mode in modes:
         print(f"\n  [stack] OPENSAI_PLACEMENT={mode}", flush=True)
         a[mode] = run_stack({'OPENSAI_PLACEMENT': mode}, list(REGIMES.keys()))
     print(f"\n  {'regime':<14}{'mode':<8}{'makespan(s)':>12}{'xfers/'+str(len(EDGES)):>11}{'devices_used':>13}{'errs':>6}", flush=True)
     for cname in REGIMES:
-        for mode in ('random', 'smart'):
+        for mode in modes:
             rows = a[mode].get(cname, [])
             print(f"  {cname:<14}{mode:<8}{avg(rows,0):>12.2f}{avg(rows,1):>11.1f}{avg(rows,2):>13.1f}{sum(x[3] for x in rows):>6}", flush=True)
-        rs, ss = a['random'].get(cname, []), a['smart'].get(cname, [])
-        if rs and ss and avg(rs, 0) > 0:
-            print(f"  {'-> smart makespan vs random:':<30}{(avg(ss,0)/avg(rs,0)-1)*100:+.0f}%", flush=True)
+        rs = a['random'].get(cname, [])
+        for mode in ('smart', 'plan'):
+            ms = a[mode].get(cname, [])
+            if rs and ms and avg(rs, 0) > 0:
+                print(f"  {'-> ' + mode + ' makespan vs random:':<30}{(avg(ms,0)/avg(rs,0)-1)*100:+.0f}%", flush=True)
 
     print(f"\n#### Phase B - cluster (W_LOAD=0) vs spread (W_LOAD=50), network-heavy ####", flush=True)
     b = {}
