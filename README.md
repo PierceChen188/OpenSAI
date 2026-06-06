@@ -134,13 +134,16 @@ class Algorithm_Foo:
 > 现成算法：`Algorithm_Pi_Calculation` / `Algorithm_Random` / `Algorithm_Sleep_1`（纯 Python，开箱即用）；
 > `Algorithm_CNN` / `Algorithm_NEW_CNN` / `Algorithm_Train`（需 `torch` + CIFAR-10 数据）。
 
-## 5. 启动 Web 前端（可选）
+## 5. 启动 Web 控制台（推荐）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -WithWeb
 ```
-然后浏览器打开 **http://127.0.0.1:5000** ，按流程“选择 + 定制 DAG → 提交 → 查看结果”。
-前端是已编译好的静态包（`dag_offload/static/`），由 `user_client.py`（Flask）提供。
+浏览器打开 **http://127.0.0.1:5000** 进入 **OpenSAI Console**：实时集群监控（含大脑账本）、
+可视化编排并提交 DAG、查看放置/执行结果、在线调系统参数、管理算法。单文件前端
+（`dag_offload/static/console.html`，无构建、不依赖外网），由 `user_client.py`（Flask）提供。
+**详细图文使用说明见 [docs/CONSOLE.md](docs/CONSOLE.md)。** 旧版编译前端保留在
+**http://127.0.0.1:5000/legacy** 。
 
 ## 6. 跑深度学习算法（可选）
 
@@ -153,36 +156,75 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -WithWeb
 两台设备各提取特征，特征经 QUIC 数据面传输后融合分类。先 `python scripts\train_collab.py`
 训练一次，再 `python scripts\demo_collab.py 10` 演示。详见 [scripts/README.md](scripts/README.md)。
 
-## 7. 多机部署
+## 7. 适配优化与资源控制（Phase 2：按任务智能放置 + 分配算力/带宽）
 
-平台是 TCP 星型结构，可跨主机部署：在每台机器设环境变量 `OPENSAI_HOST` = server 的局域网 IP、
-放行 8888 端口即可。完整步骤与限制见 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
+这一层让平台“看资源、按需放置、按量分配”，全部由环境变量 / 节点参数开关，**默认即启用智能放置**。
+机制与实现细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §11–§15。
 
-## 8. 项目结构
+### 7.1 放置（WHERE：子任务放到哪台设备）
+
+`OPENSAI_PLACEMENT` 选模式：`plan`（默认，整图前瞻就近规划）/ `smart`（自适应贪心）/
+`random`（对照基线）。节点带 `directAllocationId>0` 时优先按手动指定。
+调权重：`OPENSAI_W_XFER`（传输权重）、`OPENSAI_W_LOAD`（负载权重，↑更分散 / ↓更聚合）、
+`OPENSAI_DEFAULT_BW_MBPS`（未知链路兜底带宽）、`OPENSAI_PROBE_INTERVAL`（链路主动探测间隔秒，≤0 关）。
+
+### 7.2 资源档位（HOW MUCH：给每个任务多少算力 / 内存 / 带宽）
+
+可在 DAG 节点的 `taskInputInfo` 里**显式声明**，或让大脑**自动**决定（都会按设备“可用”收口、防超额）：
+
+| 维度 | 节点显式声明 | 自动 | 设备执行机制 |
+|---|---|---|---|
+| CPU 核 | `cores: N` | 默认 = 总核 ÷ worker_slots | 进程池 worker `cpu_affinity` 绑核 |
+| 内存 | `mem_mb: N`（= 运行基线**之上**的任务预算） | `OPENSAI_AUTO_MEM=1` 时按历史边际×2（地板 256MB） | 作业对象 / RLIMIT_AS 限“实时提交 + 预算” |
+| 带宽 | `bw_mbps: N` | `OPENSAI_TARGET_XFER_S=秒` 时按 数据量 / 目标时延 自动算 | 令牌桶限速 + 出口公平平分 |
+
+设备 / 出口预算旋钮：`OPENSAI_TASK_WORKERS`（每设备并行槽 = 进程池大小）、`OPENSAI_DEFAULT_CORES`、
+`OPENSAI_DEVICE_BW_MBPS`（大脑侧每设备出口预算）、`OPENSAI_DATA_RATE_MBPS`（发送端出口预算，在并发流间公平平分）、
+`OPENSAI_RESERVATION_TTL`（预留超时回收秒，默认 600）。
+
+### 7.3 看监测 / 跑实验
+
+```powershell
+# 实时聚合监测视图（设备资源 + 大脑账本：预留/已承诺带宽/可用核/在飞/算法画像）
+.\.venv\Scripts\python.exe scripts\show_monitor.py 10
+```
+
+量化实验脚本（放置 vs random、带宽/算力/内存分配、出口公平、多 DAG 争抢、异构容量等）一览见
+[scripts/README.md](scripts/README.md) 的“Experiments”。
+
+## 8. 多机部署
+
+平台是 TCP 星型结构，可跨主机部署：每台 device 机器设环境变量 `OPENSAI_HOST` = server 的局域网 IP，
+server 机放行 `8888`（控制面）、各 device 放行其 `OPENSAI_DATA_PORT`（数据面 QUIC/UDP）即可。
+（真实多机部署下每台机器一个 device 进程，不会有单机多进程池的 spawn 拥塞问题。）
+
+## 9. 项目结构
 
 ```
 opensai-master/
 ├─ README.md                  ← 本文件（使用指南）
-├─ scripts/                   ← 一键 setup/run/stop/smoke 脚本（见 scripts/README.md）
+├─ scripts/                   ← setup/run/stop/smoke 脚本 + 演示/实验（见 scripts/README.md）
 ├─ docs/
-│   ├─ ARCHITECTURE.md        ← 系统架构与功能说明（强烈建议通读）
-│   ├─ CODE_MAP.md            ← 真实调用链 vs 死代码地图
-│   └─ DEPLOYMENT.md          ← 多机部署
-├─ opensai_1.0/               ← 1.0 参考版本（git 忽略，仅作对比基线）
+│   ├─ CONSOLE.md             ← Web 控制台使用说明书
+│   ├─ ARCHITECTURE.md        ← 系统架构 + Phase 2 实现详解（§11–§15，强烈建议通读）
+│   └─ ROADMAP.md             ← Phase 2 路线图与进度（T 编号 WBS）
 └─ Offloading-System/         ← 主系统
     ├─ dag_offload/           ← ★ 真正的入口
-    │   ├─ server.py          ←  卸载决策 + 分发中枢（TCP，:8888）
-    │   ├─ device_client.py   ←  边缘设备执行端
+    │   ├─ server.py          ←  调度 + 放置决策 + 资源档位分配 + 分发中枢（TCP，:8888）
+    │   ├─ device_client.py   ←  边缘设备执行端（心跳/监测、收子任务、绑核/限内存执行、回结果）
+    │   ├─ run_device.py      ←  设备轻量启动器（避开 Windows 进程池 spawn 卡死）
+    │   ├─ task_pool.py       ←  进程池 + 绑核 + 内存上限（算力资源控制 T4.2/B4）
     │   ├─ user_client.py     ←  Web/API 前端（Flask，:5000）
-    │   └─ offloading_brain/  ←  卸载决策（目前：随机/指定）
-    ├─ device/implements/Algorithm_*.py   ← 算法
-    ├─ device/interfaces/resource_control_interface.py  ← Docker 资源控制
+    │   └─ offloading_brain/  ←  放置决策：plan(前瞻) / smart(贪心) / random（RL 待做）
+    ├─ network/dataplane/     ←  QUIC 设备间数据面（ArtifactServer 发送端 + fetch_blob；限速/出口公平）
+    ├─ device/implements/Algorithm_*.py   ← 算法（含协同感知 FeatureExtract/Fusion + collab_model）
+    ├─ device/interfaces/resource_control_interface.py  ← Docker 资源控制（可选/旧路径）
     ├─ predis/                ← Redis 设备注册表 / 服务层
     ├─ task/ result/ config/  ← 任务模型 / 结果模型 / 配置
     └─ requirements*.txt       ← core / -ml / -optional
 ```
 
-## 9. 日志与常见问题
+## 10. 日志与常见问题
 
 - **日志**：运行时日志在 `.run\server.err.log` / `.run\device.err.log`（git 忽略）。
 - **必须用脚本/从仓库根目录启动**：`run.ps1` 会从仓库根目录拉起进程（保证路径正确）。
@@ -192,12 +234,13 @@ opensai-master/
   任务会在设备上线后自动继续（不会崩）。
 - **端口 8888 被占**：`stop.ps1 -All` 清干净再 `run.ps1`。
 
-## 10. 文档与版本
+## 11. 文档与版本
 
-- 架构与能力：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 代码地图（活/死代码）：[docs/CODE_MAP.md](docs/CODE_MAP.md)
-- 多机部署：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-- 脚本说明：[scripts/README.md](scripts/README.md)
+- Web 控制台使用说明：[docs/CONSOLE.md](docs/CONSOLE.md)
+- 架构与 Phase 2 实现详解：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（§11–§15）
+- 路线图与进度：[docs/ROADMAP.md](docs/ROADMAP.md)
+- 脚本 / 演示 / 实验：[scripts/README.md](scripts/README.md)
 
 版本（git tag）：`v1.1-inherited`（接手原样）→ `v1.1.1`（可复现+止血修复）→
-`v1.1.2`（死代码清理 + 卸载健壮性 + 多机配置）。对比某两版：`git diff v1.1-inherited v1.1.2`。
+`v1.1.2`（死代码清理 + 卸载健壮性 + 多机配置）。此后 **Phase 2**（未打 tag，见 ROADMAP）：
+协同感知 QUIC 数据面、真实监测 + 聚合视图、自适应/前瞻放置、CPU/内存/带宽资源档位分配。

@@ -2,14 +2,15 @@
 
 本文说明 OpenSAI 的整体架构、各组件职责、运行时数据流、通信协议、任务模型，
 以及**当前能做什么 / 还不能做什么**。配套文档：
-[README.md](../README.md)（使用）、[CODE_MAP.md](CODE_MAP.md)（活/死代码）、
-[DEPLOYMENT.md](DEPLOYMENT.md)（多机）、[ROADMAP.md](ROADMAP.md)（Phase 2 路线图与进度）。
+[README.md](../README.md)（使用）、[CONSOLE.md](CONSOLE.md)（Web 控制台）、
+[ROADMAP.md](ROADMAP.md)（Phase 2 路线图与进度）。
 
-> **⚠️ Phase 2 进展提示（本文 §2/§8/§9 的部分基线已过时）**：§1–§10 描述的是 v1.1.2 基线。
-> 此后 Phase 2 已落地：**QUIC 设备间数据面**（跨设备自动传输产物，§9 的“数据不自动传输”已不再成立）、
-> **真实网络监测**（带宽/时延/RTT，§2.3 的“硬编码 0”已不再成立）、以及
-> **自适应 + 前瞻的智能放置**（取代“随机/手动”，§2.2 的卸载决策已升级）。
-> 放置/设备选择的当前实现见下方 **§11**；整体进度见 [ROADMAP.md](ROADMAP.md)。
+> **⚠️ Phase 2 进展提示（§1–§10 是 v1.1.2 基线，多处已被超越）**：此后 Phase 2 已落地——
+> **QUIC 设备间数据面**（§9 的“数据不自动传输”已不成立）、**真实网络/资源监测 + server 聚合视图**
+> （§2.3 的“硬编码 0”已不成立）、**自适应 + 前瞻智能放置**（取代 §2.2 的“随机/手动”）、以及
+> **资源控制 + 资源档位分配**（§2.3 的“带宽分配缺失”已不成立：算力绑核 / 内存上限 / 网络限速 +
+> 大脑按任务分配 CPU/内存/带宽）。当前实现见 **§11 放置 · §12 资源控制机制 · §13 资源档位分配 ·
+> §14 监测聚合 · §15 健壮性**；整体进度见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -23,12 +24,13 @@ OpenSAI 是一个 **DAG 计算卸载平台**：把一个应用拆成有依赖关
 | 层 | 设计职责 | 当前实现度 |
 |---|---|---|
 | **应用层** | 定义/发布 DAG 任务、查看设备状态与回传结果 | ✅ 基本完成 |
-| **智联服务层** | 计算卸载决策、集群管理、适配优化（启发式/RL） | ⚠️ 卸载/调度可用；**智能优化是空壳** |
-| **服务定制网络层** | 设备通信收发、资源监测、资源控制 | ⚠️ 通信+算力控制可用；**带宽/真实监测缺失** |
+| **智联服务层** | 计算卸载决策、集群管理、适配优化（放置 + 资源档位） | ✅ 自适应/前瞻放置 + CPU/内存/带宽档位分配已落地（§11/§13）；RL 仍空壳 |
+| **服务定制网络层** | 设备通信收发、资源监测、资源控制 | ✅ QUIC 数据面 + 真实监测/聚合视图 + 算力/内存/网络控制（§12/§14）；多路径待做 |
 
-> 一句话现状：**“把 DAG 跑起来、按依赖分发到设备、收结果”这条主干是通的、扎实的；
-> 真正体现科研价值的“智能/自适应”部分（启发式/RL 卸载、资源感知调度、带宽分配、
-> 应用层反馈）目前是占位或缺失。**
+> 一句话现状（Phase 2 后）：**主干（按依赖把 DAG 分发到设备、收结果）扎实；“智能/自适应”这一层
+> 已从占位变为可用——位置感知 + 前瞻放置、按任务分配 CPU/内存/带宽、真实资源/链路监测与 server 聚合
+> 视图都已落地并有量化实验（§11–§15）。仍待做：RL 决策、多网卡多路径、应用层自适应反馈。**
+> （下文 §2/§8/§9 为 v1.1.2 历史基线，保留备查；以 §11–§15 为准。）
 
 ---
 
@@ -165,7 +167,7 @@ OpenSAI 是一个 **DAG 计算卸载平台**：把一个应用拆成有依赖关
 5. **设备注册与在线管理**（心跳、Redis 在线表、断开自动剔除）。
 6. **按需扩展算法**：丢一个 `Algorithm_*.py` 即可（或前端上传）。
 7. **单机 Docker 资源控制**：限/调 CPU 与内存、容器起停/复用/回收。
-8. **多机部署**：设 `OPENSAI_HOST` 即可跨主机（见 DEPLOYMENT.md）。
+8. **多机部署**：设 `OPENSAI_HOST` 即可跨主机（见 README §8）。
 9. **Web 可视化**：拖拽定制 DAG、查看设备与结果（预编译前端）。
 
 ## 8. 设计中但尚未实现（❌ 后续工作）
@@ -186,7 +188,7 @@ OpenSAI 是一个 **DAG 计算卸载平台**：把一个应用拆成有依赖关
 - **容器未复用**（每任务起删一个容器），有冷启动开销。
 - **TCP 粘包**靠 sleep 规避，高并发下不够稳。
 - **错误吞咽**：部分异常被静默 `try/except` 吞掉（如 `RedisUtils`），排障需看日志。
-- 详细的“活代码 vs 死代码”见 [CODE_MAP.md](CODE_MAP.md)。
+- 死代码/历史清理详情见 git 历史与 [ROADMAP.md](ROADMAP.md)。
 
 ## 10. 演进方向（阶段 2 起点）
 
@@ -261,7 +263,133 @@ CPU/内存（每次心跳实时采样）、在建任务数（`work_status`）、
 | 网络重（数据大） | −56% | **−84%**（接近“全聚合”理论上限） |
 
 复现：`scripts/exp_placement_quant.py`（3 设备规模扫描）、`scripts/exp_placement_scale.py`
-（24 节点 ×10 设备）。详细实验结论见 [ROADMAP.md](ROADMAP.md)。
+（24 节点 ×10 设备）、`scripts/exp_collab_adaptation.py`（45 节点错综 lattice ×10 设备）。
+后者：**网络重档 plan 比 random makespan −31%、跨设备传输 49.5→16/56**；计算重档仅 −4~−8%
+（瓶颈在关键路径的串行单核计算，放置改不了它——分析与改进见 §13.4）。详见 [ROADMAP.md](ROADMAP.md)。
 
-> 仍未做（属适配优化的“给多少资源”那一维，依赖资源控制机制先落地）：**资源档位分配**
-> （决定给每个任务多少 CPU/带宽并调用资源控制接口执行）——见 ROADMAP 的 T3.2 / T4 / T5.3。
+> 适配优化的另一维“**给多少资源**”（资源档位分配）现已落地：见下文
+> **§12 资源控制机制**（算力/内存/网络的“执行手段”）、**§13 资源档位分配**（大脑“给多少”的决策）、
+> **§14 监测·聚合视图**（决策依据）、**§15 健壮性兜底**。
+
+---
+
+## 12. 资源控制机制（Phase 2c：算力 / 内存 / 网络的“执行手段”）
+
+资源控制分两层：**机制**（本节，怎么把限制施加到任务上）与**决策**（§13，大脑决定给多少）。
+机制全部**跨平台、免容器**（领导要的是“进程控制”而非纯容器；Docker 仍可用但不再是主路径）。
+
+### 12.1 进程池 + 绑核（T4.2，`dag_offload/task_pool.py`）
+
+设备把 CPU 密集的算法执行交给一个**预建的 worker 进程池**（`ProcessPoolExecutor`，大小由
+`OPENSAI_TASK_WORKERS` 指定）：
+
+- **控并发 + 复用 + 真并行**：最多 N 个任务同时算、worker 循环复用、用进程绕开 GIL 真正吃多核；
+  `worker_slots`（=池大小）随心跳上报，供放置做 capacity-aware 负载折算。
+- **绑核 = 算力手环**：每个任务按大脑下发的 `_alloc.core_ids` 用 `psutil.cpu_affinity` 钉到一组核
+  （`run_task` 里自绑），跨平台限 CPU。池构建时也把各 worker 按 PID 预绑到不相交的核片。
+- **Windows spawn 三个坑（已解）**：① worker 重新 import 入口脚本——入口若是重型 `device_client`
+  会卡死 → 新增轻量启动器 `run_device.py`（`device_client` 只在 `__main__` 内 import）；
+  ② 与运行中的 asyncio IOCP 循环并发 spawn 会卡 → 进程池在事件循环/线程启动**前同步构建**，带超时
+  预热自检（`OPENSAI_POOL_WARMUP_S`）失败则判不可用；③ 不用 `multiprocessing.Manager` 传核分配
+  （spawn 下连代理会卡）→ 改由主进程按 PID 绑核。
+- **回退**：池不可用（预热超时）或运行中损坏（`BrokenProcessPool`）→ 回退主进程内执行，保证设备照常出结果。
+
+### 12.2 内存硬上限（B4，`task_pool._set_process_memory_limit`）
+
+跨平台给 worker 进程设内存上限：**Windows 用作业对象 Job Object（`ProcessMemoryLimit`，可更新）**、
+**POSIX 用 `RLIMIT_AS`**；超限的内存分配抛 `MemoryError`。每任务的上限语义见 §13.2（“基线 + 任务预算”）。
+两个关键正确性点（各让回归先挂过 2/4 才修对）：
+- **锚定“提交内存(commit/vms)”而非 RSS**：作业对象/RLIMIT_AS 限的是提交内存，torch/numpy 预留使
+  commit 远大于 RSS，按 RSS 设上限会落在真实 commit 之下 → 立刻 `MemoryError`。
+- **锚定“实时”值而非预热静态基线**：worker 复用且 Python 不把释放内存还给 OS，进程占用会漂高；
+  按静态基线设的上限会落在当前占用之下 → 误杀无辜任务。故上限恒 ≥ 当前占用、只限任务自身增长。
+
+### 12.3 网络限速 + 出口公平平分（T5.3 + A1，`network/dataplane/quic_server.py`）
+
+数据面发送端（`ArtifactServer`）按**令牌桶**对“交给 QUIC 的字节速率”分块限速（不限速走整块快速路径）：
+
+- **每流速率** = `min(本次请求 rate_mbps, 设备出口公平份额)`。
+- **A1 出口公平平分**（`_EgressShare`）：设备出口预算 `OPENSAI_DATA_RATE_MBPS` 在**当前活跃的受控流**
+  之间动态平分（`budget / 活跃流数`，随流加入/结束实时再平分）。修了一个真 bug：旧逻辑是**每条流**
+  各自限到设备上限 → N 条并发各占满 = N 倍超额；现在守住设备出口。`_EgressShare` 每设备一个、所有
+  连接共用、只在单一事件循环线程改计数（无锁）。
+- 演示 `scripts/exp_egress_fairshare.py`：预算 4MB/s，双流各 6MB → 各 ~1.9、合计 3.8（守住 4 而非 8）。
+
+---
+
+## 13. 资源档位分配（适配优化的“给多少”维度，Phase 2c）
+
+放置（§11）决定 **WHERE**；本节决定 **HOW MUCH**——大脑给每个任务算 CPU 核数 / 内存预算 / 传输带宽，
+注入派发报文，由 §12 的机制执行。决策都**按设备上报的“可用”收口**，避免超额。
+
+### 13.1 带宽分配（A：`server._artifact_rate_mbps`）
+
+给“从源设备拉到本消费者”的每条跨设备传输分配限速（同机本地直读不分配）：
+`rate = min(需求, 源设备出口预算 OPENSAI_DEVICE_BW_MBPS − 已承诺)`，地板 `OPENSAI_MIN_BW_MBPS`。其中**需求**：
+- ① 节点显式声明 `bw_mbps`；
+- ② **A2 自动**：未声明且设了目标时延 `OPENSAI_TARGET_XFER_S` 时，按 `前驱实测产出字节 / 目标时延`
+  自动估算（产出字节存于 `server.output_sizes`，免手填）；
+- ③ 都没有 → 不设需求上限。
+
+分配即在源设备记账（`committed_bw`）、完成时在 `dag_subtask_rsp` 归还（= 带宽侧“已承诺/可用”）。
+实际限速由 §12.3 的令牌桶执行；设备出口的并发公平由 §12.3 的 A1 兜住。
+
+### 13.2 算力 / 内存档位（B：`server._alloc_compute` → `param_dict['_alloc']`）
+
+为每个就绪子任务算一份 `{cores, mem_budget_mb, est_mem_mb}` 注入派发报文：
+- **cores**：节点声明 `cores` / `OPENSAI_DEFAULT_CORES` / 否则设备默认槽（总核 ÷ worker_slots）；
+  **B2 按设备可用核收口**（`cores_total − cores_committed`）。
+- **mem_budget_mb（内存预算）**：节点显式声明 `mem_mb`（当作“基线之上的任务预算”）；或开了
+  `OPENSAI_AUTO_MEM` 且有历史时**自动定档** = `max(历史边际×2, 256MB)`；按设备空闲内存收口。
+  worker 端上限 = **实时提交内存 + 预算**（§12.2），所以自动定档也安全、不误杀。
+
+**数据通路**：server `_alloc_compute` 注入 `_alloc` → 设备 `process_task` 读 `_alloc`、用 `CoreAllocator`
+租 K 个不相交的核、把 `{core_ids, mem_budget_mb}` 传给 worker、并按预估把内存计入 `committed_mem`
+（完成归还）→ worker `run_task` 自绑核 + 设内存上限后执行。演示：`scripts/exp_compute_alloc.py`
+（同一 matmul 1 核 105s vs 16 核 0.2s ≈ 500×）、`scripts/exp_mem_budget.py`（400MB 任务 预算 100MB→被杀、800MB→通过）。
+
+### 13.3 任务历史画像（B1，`server.algo_history`）
+
+设备在 `dag_subtask_rsp` 上报每任务 `metrics{peak_mem_mb, task_mem_mb(扣掉 worker 基线的边际增长),
+proc_secs}`；server 按算法名做 EWMA 聚合。用途：① 记账（`committed_mem` 用边际预估，更准）；
+② §13.2 的内存自动定档（`OPENSAI_AUTO_MEM`）；③ 体现在 §14 的聚合视图里。
+
+### 13.4 何时有用、何时帮不上（重要）
+
+适配优化优化的是 **WHERE/HOW MUCH**，所以：
+- **数据搬运是瓶颈时赢得多**（协同感知真实情形=大特征张量）：放置就近省传输 → 网络重档 **−31%**。
+- **瓶颈在“关键路径上的串行单核计算”时几乎帮不上**（计算重档 −4%）：① 总时间被串行链卡死，放置
+  只能并行独立分支、压不短串行链；② 桩计算是单核 GIL，**“多给核”这条杠杆对它空转**；③ 数据小，
+  就近省不到东西；④ random 本就把独立任务铺得挺匀。**这不是失效，是瓶颈不在放置/分配上。**
+- **改进方向**：用真多核计算（numpy/torch 释放 GIL，核分配立刻变巨大杠杆，见 `exp_compute_alloc`）；
+  让并行宽度>设备容量并引入**设备异构**，则容量感知放置避免把活堆到弱设备（`scripts/exp_compute_adaptation.py`）。
+- **并发下的瓶颈可能是传输本身**：`scripts/exp_multidag_contention.py`（8 DAG 并发）批完成时间被
+  aioquic 数据面吞吐（~10MB/s 单事件循环）卡住，放置只改善尾延迟 −9% → 指向多路径传输（T5.4/T5.5）。
+
+---
+
+## 14. 监测·聚合视图（T1：决策依据，全为实测）
+
+放置/分配的所有输入都来自真实监测（不再是硬编码 0）：
+
+- **T1.1 已承诺/可用算力**：心跳上报 `cores_total/cores_committed`、`mem_committed_mb`、`worker_slots`、
+  `work_status`（在建任务数）；“可用 = 总 − 已承诺”由读取方算。
+- **T1.2 链路遥测**：`device_client.observed_links` = 设备间有效带宽/时延，**被动**（每次真实产物拉取
+  的字节/耗时打点，EWMA）+ **主动**（`_probe_loop` 周期性拉 4MB `__probe__`，`OPENSAI_PROBE_INTERVAL<=0`
+  关闭）。+ 服务器↔设备 RTT（心跳往返计时）。
+- **T1.3 server 聚合视图**（`server.aggregate_monitor_view`）：把**设备心跳**与**大脑自有账本**
+  （放置预留 `reservations` / 已承诺出口带宽 `committed_bw` / 在飞任务 `inflight` / 算法历史画像
+  `algo_history`）合并成一份权威快照——这些账本只在 server 内存、Redis 心跳里没有，故只有 server
+  能给出完整视图。卸载线程每 ~5s 发布到 Redis 键 `OPENSAI_MONITOR_VIEW`（TTL 30s）。
+  `scripts/show_monitor.py` 优先展示它（含 预留/已承诺带宽/可用核/在飞/画像表），缺失则回退原始心跳。
+
+---
+
+## 15. 健壮性兜底（C1 / C2）
+
+- **C1 预留泄漏回收**（`server._reclaim_stale_reservations`）：设备崩溃/任务永不上报完成时，其占的
+  放置预留 + 带宽预留不会自动归还 → 卸载线程每 ~30s 按 TTL（`OPENSAI_RESERVATION_TTL`，默认 600s）
+  回收超时在飞任务（`inflight` 登记），防账本越扣越满、最后谁都放不进去。
+- **C2 回退守限**（`device_client.process_task`）：仅进程池**损坏**（`BrokenProcessPool`）才回退主进程内
+  执行，且**大声告警 + 禁用坏池**；任务自身异常（超内存/算法错/超时）按 `ERROR:` 失败返回，
+  **不绕过**核/内存限额。

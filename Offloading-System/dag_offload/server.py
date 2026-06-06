@@ -59,6 +59,8 @@ class UserServer:
     # B1 历史画像：algo_name -> {peak_mem_mb, task_mem_mb, proc_secs, n}（设备 rsp 上报 metrics 后 EWMA）。
     # task_mem_mb=扣掉 worker 基线的「任务边际内存」；供 B4 在开 OPENSAI_AUTO_MEM 时自动定内存档(基线+边际×系数)。
     algo_history = {}
+    # 前端可调的运行期放置模式（经 Redis 键 OPENSAI_RT:placement 下发；None=用环境变量）。
+    runtime_placement = None
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -77,7 +79,8 @@ class UserServer:
         logging.info('making offloading strategy for subtask')
         device_info_list = DeviceServiceImpl.read_device_info()
         # 默认 plan（前瞻整图规划）；设备掉线会自动回退贪心。smart=纯贪心自适应；random=对照。
-        mode = os.environ.get('OPENSAI_PLACEMENT', 'plan').lower()
+        # runtime_placement（前端经 Redis 下发的运行期模式）优先于环境变量，便于演示时实时切换对比。
+        mode = (cls.runtime_placement or os.environ.get('OPENSAI_PLACEMENT', 'plan')).lower()
         if subtask.get_sub_task_direct_allocate_id() != -1:
             # 手动指定（directAllocationId>0）：保持原行为不变。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
@@ -162,8 +165,39 @@ class UserServer:
             'inflight_tasks': len(cls.inflight),                # C1 在飞(已派发未完成)子任务数
             'algo_history': {a: {k: (round(v, 1) if isinstance(v, float) else v)
                                  for k, v in h.items()} for a, h in cls.algo_history.items()},  # B1 画像
+            'runtime': {'placement': cls.runtime_placement or os.environ.get('OPENSAI_PLACEMENT', 'plan'),
+                        'w_load': OffloadingImpl.W_LOAD, 'w_xfer': OffloadingImpl.W_XFER,
+                        'auto_mem': bool(os.environ.get('OPENSAI_AUTO_MEM')),
+                        'target_xfer_s': float(os.environ.get('OPENSAI_TARGET_XFER_S', '0') or 0)},
             'ts': time.time(),
         }
+
+    @classmethod
+    def _refresh_runtime_config(cls):
+        """读取前端经 Redis(键 OPENSAI_RT:*) 下发的【安全可调】运行期参数并应用：放置模式 / 放置权重 /
+        自动内存 / 自动带宽目标。端口、worker 数、主机等易出错项不在此列(需重启、不开放给前端)。"""
+        try:
+            _r = RedisUtils().r
+            pm = _r.get('OPENSAI_RT:placement')
+            pm = pm.decode() if isinstance(pm, bytes) else pm
+            cls.runtime_placement = pm if pm in ('plan', 'smart', 'random') else None
+            for key, attr in (('w_load', 'W_LOAD'), ('w_xfer', 'W_XFER')):
+                v = _r.get('OPENSAI_RT:' + key)
+                if v is not None:
+                    try:
+                        setattr(OffloadingImpl, attr, float(v.decode() if isinstance(v, bytes) else v))
+                    except (ValueError, TypeError):
+                        pass
+            for key, env in (('auto_mem', 'OPENSAI_AUTO_MEM'), ('target_xfer_s', 'OPENSAI_TARGET_XFER_S')):
+                v = _r.get('OPENSAI_RT:' + key)
+                if v is not None:
+                    v = v.decode() if isinstance(v, bytes) else str(v)
+                    if env == 'OPENSAI_AUTO_MEM':
+                        os.environ[env] = '1' if v in ('1', 'true', 'True', 'on') else ''
+                    else:
+                        os.environ[env] = v
+        except Exception:
+            pass
 
     @classmethod
     def _artifact_rate_mbps(cls, sub_task_info, src_device_no, pred_node_id=None):
@@ -363,17 +397,22 @@ class UserServer:
         logging.info('The thread for offloading making process start...')
         _last_reclaim = [time.time()]   # C1：上次回收时间（列表以便闭包内可改）
         _last_view = [0.0]              # T1.3：上次发布聚合监测视图的时间
+        _last_cfg = [0.0]               # 上次刷新前端下发的运行期参数的时间
         while True:
 
             try:
+                # 每 ~2s 刷新前端经 Redis 下发的运行期参数（放置模式/权重/自动内存/自动带宽目标）。
+                if time.time() - _last_cfg[0] > 2:
+                    cls._refresh_runtime_config()
+                    _last_cfg[0] = time.time()
                 # C1：每 ~30s 回收一次超时未完成任务的预留（防设备崩溃后账本永久虚高）。
                 if time.time() - _last_reclaim[0] > 30:
                     with cls.data_lock:
                         cls._reclaim_stale_reservations()
                     _last_reclaim[0] = time.time()
-                # T1.3：每 ~5s 发布一次 server 侧聚合监测视图(设备心跳 + 大脑账本)到 Redis，
-                # 供 show_monitor 展示完整画面(含预留/已承诺带宽/在飞/画像)；TTL 30s，server 挂了自动过期。
-                if time.time() - _last_view[0] > 5:
+                # T1.3：每 ~2s 发布一次 server 侧聚合监测视图(设备心跳 + 大脑账本)到 Redis，
+                # 供前端/ show_monitor 展示完整画面(含预留/已承诺带宽/在飞/画像)；TTL 30s，server 挂了自动过期。
+                if time.time() - _last_view[0] > 2:
                     try:
                         with cls.data_lock:
                             _view = cls.aggregate_monitor_view()

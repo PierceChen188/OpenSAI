@@ -3,9 +3,9 @@
 > 本目录是 OpenSAI 主系统。**使用指南和架构说明请看仓库根目录的文档**，不要以本文件为准：
 >
 > - 使用 / 快速上手：[../README.md](../README.md)
+> - Web 控制台使用说明：[../docs/CONSOLE.md](../docs/CONSOLE.md)
 > - 系统架构与功能：[../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
-> - 真实调用链 / 死代码地图：[../docs/CODE_MAP.md](../docs/CODE_MAP.md)
-> - 多机部署：[../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)
+> - 路线图与进度：[../docs/ROADMAP.md](../docs/ROADMAP.md)
 
 真正的入口在 `dag_offload/`：`server.py`（卸载决策+分发中枢）、`device_client.py`
 （边缘设备执行端）、`user_client.py`（Web/API 前端）。`dag_offload/README.md` 内含
