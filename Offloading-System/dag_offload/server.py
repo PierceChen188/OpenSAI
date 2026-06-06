@@ -56,8 +56,8 @@ class UserServer:
     # C1 预留泄漏兜底：(task_id, node_id) -> (device_no, 放置时间戳)。完成时移除；超时(任务似已死)由
     # 卸载线程定期回收其放置预留 + 带宽预留，防止设备崩溃后账本永久虚高。
     inflight = {}
-    # B1 历史画像：algo_name -> {peak_mem_mb, proc_secs, n}（设备在 rsp 上报 metrics 后 EWMA 更新）。
-    # 供 B2 在任务未显式声明内存时，按历史峰值自动定档。
+    # B1 历史画像：algo_name -> {peak_mem_mb, task_mem_mb, proc_secs, n}（设备 rsp 上报 metrics 后 EWMA）。
+    # task_mem_mb=扣掉 worker 基线的「任务边际内存」；供 B4 在开 OPENSAI_AUTO_MEM 时自动定内存档(基线+边际×系数)。
     algo_history = {}
 
     @classmethod
@@ -135,11 +135,13 @@ class UserServer:
             logging.warning(f"[reclaim] 子任务 {key} 超过 {ttl}s 未完成，回收其设备 {dev} 的预留")
 
     @classmethod
-    def _artifact_rate_mbps(cls, sub_task_info, src_device_no):
+    def _artifact_rate_mbps(cls, sub_task_info, src_device_no, pred_node_id=None):
         """T3.2-A 带宽分配：给「从源设备 src_device_no 拉到本消费者」这条传输分配限速(MB/s)，None=不限。
 
-        策略 = min(任务声明的需求, 源设备出口预算 - 已承诺)，地板值 OPENSAI_MIN_BW_MBPS。
-          - 需求：消费者节点 taskInputInfo 里声明的 `bw_mbps`（没声明则不设需求上限）。
+        策略 = min(需求, 源设备出口预算 - 已承诺)，地板值 OPENSAI_MIN_BW_MBPS。
+          - 需求：① 消费者节点 taskInputInfo 里声明的 `bw_mbps`；② 未声明且设了目标传输时延
+            OPENSAI_TARGET_XFER_S 时，按【前驱实测产出字节数 / 目标时延】自动估算需求(A2，免手填)；
+            ③ 都没有则不设需求上限。
           - 预算：OPENSAI_DEVICE_BW_MBPS（每设备出口，0=不限）。
         分配即在源设备上记账(committed_bw)，完成时在 dag_subtask_rsp 归还。同机传输(本地直读、不走网络)不分配。
         OPENSAI_FORCE_RATE_MBPS 若设置则强制该值（实验用）。"""
@@ -163,6 +165,14 @@ class UserServer:
             demand = float(d) if d else None
         except Exception:
             demand = None
+        # A2：未显式声明时，按前驱实测产出大小 / 目标传输时延 自动估算需求(MB/s)；免手填 bw_mbps。
+        if demand is None and pred_node_id is not None:
+            target_s = float(os.environ.get('OPENSAI_TARGET_XFER_S', '0') or 0)
+            nbytes = cls.output_sizes.get((sub_task_info.get_task_id(), pred_node_id), 0)
+            if target_s > 0 and nbytes > 0:
+                demand = (nbytes / (1024 * 1024)) / target_s
+                logging.info(f"[alloc] 带宽(A2自动): 前驱{pred_node_id} {nbytes}B / 目标{target_s}s "
+                             f"-> 需求 {demand:.2f} MB/s")
         budget = float(os.environ.get('OPENSAI_DEVICE_BW_MBPS', '0') or 0)
         if budget <= 0:
             rate = demand                      # 无预算：仅受声明需求约束（没声明则不限）
@@ -192,27 +202,35 @@ class UserServer:
         if cores is None:
             d = int(os.environ.get('OPENSAI_DEFAULT_CORES', '0') or 0)
             cores = d if d > 0 else None
-        mem_mb = param.get('mem_mb')                       # 仅显式声明才硬限内存
         hist = cls.algo_history.get(algo) or {}
-        est_mem_mb = int(hist['peak_mem_mb']) if hist.get('peak_mem_mb') else None   # B1 历史预估(不强制)
-        if dev_dict:                                        # B2：按可用收口
+        marginal = hist.get('task_mem_mb')                  # 历史「任务边际内存」(扣掉 worker 基线)
+        est_mem_mb = int(marginal) if marginal else None    # 记账预估(边际)
+        # B4 内存预算(基线之上的“任务预算”，worker 端上限=基线+预算)：
+        #   ① 节点显式声明 mem_mb(此处当作边际预算)；
+        #   ② 否则开了 OPENSAI_AUTO_MEM 且有历史 -> 边际×2、地板 256MB 自动定档(安全:上限恒>基线，不误杀)。
+        budget = param.get('mem_mb')
+        if budget is None and os.environ.get('OPENSAI_AUTO_MEM') and marginal:
+            budget = max(marginal * 2.0, 256.0)
+        if dev_dict:                                        # B2：按设备可用收口
             avail_cores = max(1, int(dev_dict.get('cores_total') or os.cpu_count() or 1)
                               - int(dev_dict.get('cores_committed') or 0))
             if cores:
                 cores = min(int(cores), avail_cores)
             idle_mb = float(dev_dict.get('idle_memory') or 0) * 1024
-            if mem_mb and idle_mb > 0:
-                mem_mb = min(int(mem_mb), int(idle_mb * 0.9))
-        return {'cores': cores, 'mem_mb': mem_mb, 'est_mem_mb': est_mem_mb}
+            if budget and idle_mb > 0:
+                budget = min(float(budget), idle_mb * 0.9)
+        return {'cores': cores, 'mem_budget_mb': (int(budget) if budget else None),
+                'est_mem_mb': est_mem_mb}
 
     @classmethod
     def _update_algo_history(cls, algo, metrics):
         """B1：用设备上报的 metrics(EWMA) 更新算法历史画像。"""
         if not algo or not isinstance(metrics, dict):
             return
-        h = cls.algo_history.setdefault(algo, {'peak_mem_mb': 0.0, 'proc_secs': 0.0, 'n': 0})
+        h = cls.algo_history.setdefault(algo, {'peak_mem_mb': 0.0, 'task_mem_mb': 0.0,
+                                               'proc_secs': 0.0, 'n': 0})
         a = 0.5
-        for k in ('peak_mem_mb', 'proc_secs'):
+        for k in ('peak_mem_mb', 'task_mem_mb', 'proc_secs'):   # B4 增记 task_mem_mb(边际)
             v = metrics.get(k)
             if v:
                 h[k] = float(v) if h['n'] == 0 else a * float(v) + (1 - a) * h[k]
@@ -372,8 +390,8 @@ class UserServer:
                     'src_ip': dev.get('ip_address'),
                     'src_port': dev.get('data_port'),
                     'pred_id': p,
-                    # T3.2-A：按任务声明 + 源设备带宽预算，分配这条传输的限速(MB/s)；None=不限。
-                    'rate_mbps': cls._artifact_rate_mbps(sub_task_info, pred_dev.get_device_no()),
+                    # T3.2-A：按需求(声明/A2自动按数据量) + 源设备带宽预算，分配这条传输的限速(MB/s)；None=不限。
+                    'rate_mbps': cls._artifact_rate_mbps(sub_task_info, pred_dev.get_device_no(), pred_node_id=p),
                 })
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")

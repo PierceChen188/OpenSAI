@@ -23,6 +23,18 @@ from concurrent.futures import ProcessPoolExecutor
 _JOB_HANDLE = None   # 保活 Windows 作业对象句柄（关闭会解除限制），进程退出时自动释放
 
 
+def _mem_mb():
+    """当前进程 (RSS, 提交内存) (MB)；取不到返回 (0,0)。
+    RSS=常驻内存(给人看的峰值)；提交内存=Windows 作业对象 / POSIX RLIMIT_AS 实际限制的量
+    (psutil 的 vms：Windows≈Pagefile提交、POSIX≈虚拟地址空间)，内存上限必须锚定它。"""
+    try:
+        import psutil
+        m = psutil.Process().memory_info()
+        return round(m.rss / 1024 / 1024, 1), round(m.vms / 1024 / 1024, 1)
+    except Exception:
+        return 0.0, 0.0
+
+
 def _win_set_process_memory_limit(mem_bytes):
     """Windows 内存硬上限：把当前进程加入一个设了 ProcessMemoryLimit 的作业对象(Job Object)，
     超过该提交内存的分配将失败(Python 抛 MemoryError)。返回是否设置成功。"""
@@ -125,19 +137,24 @@ def run_task(algorithm_name, param_dict, data_dict):
             psutil.Process().cpu_affinity(list(core_ids))
         except Exception as e:  # noqa: BLE001
             logging.warning(f"[pool] 按任务绑核失败 {core_ids}: {e}")
-    mem_mb = alloc.get('mem_mb')
-    if mem_mb:
-        _set_process_memory_limit(int(mem_mb) * 1024 * 1024)
+    # B4：每任务内存上限 = 【本任务开跑前的实时提交内存】 + 任务预算(mem_budget_mb)。
+    #   关键①：限的是提交内存(commit/vms)，不是 RSS；提交常远大于 RSS(torch/numpy 预留大)，
+    #          按 RSS 设上限会落在真实提交之下 -> 立刻 MemoryError。必须锚定提交内存。
+    #   关键②：worker 复用 + Python 不把释放的内存还给 OS -> 进程占用随历史任务漂高；锚定【实时】
+    #          提交而非静态基线，上限就永远 ≥ 当前占用 -> 绝不误杀已有状态；本任务额外增长被限在 budget 内。
+    _rss0, vms0 = _mem_mb()
+    budget = alloc.get('mem_budget_mb')
+    abs_mb = alloc.get('mem_mb')                          # 兼容：显式绝对上限(如 worker 级 env)
+    if budget:
+        _set_process_memory_limit(int(vms0 + float(budget)) * 1024 * 1024)
+    elif abs_mb:
+        _set_process_memory_limit(int(abs_mb) * 1024 * 1024)
     from device.implements.actuator_impl import ActuatorImpl
     result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
-    # B1：上报本任务峰值内存（worker 进程当前 RSS，含已加载库≈本类任务真实占用），供历史画像。
-    peak_mb = 0.0
-    try:
-        import psutil
-        peak_mb = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
-    except Exception:
-        pass
-    return result, {'peak_mem_mb': peak_mb}
+    # 内存画像：peak_mem_mb = 进程当前 RSS(给人看)；task_mem_mb = 本任务相对开跑前的【提交内存边际增长】
+    # (与上限同单位；B4 历史按它定档：自动给档 = 边际×系数 + 地板，作为加到实时提交之上的预算 -> 安全)。
+    rss1, vms1 = _mem_mb()
+    return result, {'peak_mem_mb': rss1, 'task_mem_mb': round(max(0.0, vms1 - vms0), 1)}
 
 
 def build_pool():

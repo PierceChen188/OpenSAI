@@ -179,12 +179,13 @@ class DeviceClient:
             srv_alloc = param_dict.get('_alloc') or {}
             default_cores = max(1, (os.cpu_count() or 1) // max(1, cls.worker_slots))
             req_cores = int(srv_alloc.get('cores') or param_dict.get('cores') or default_cores)
-            req_mem_mb = srv_alloc.get('mem_mb', param_dict.get('mem_mb'))   # 硬上限：仅显式声明才有；None=不限
-            # 记账用「预估占用」：声明上限 > 历史预估 > 0。用于 committed_mem 上报(T1.1)，不做硬限。
-            acct_mem = int(req_mem_mb or srv_alloc.get('est_mem_mb') or 0)
+            # B4：内存按「任务边际预算」(mem_budget_mb，声明/历史自动)；worker 端上限=基线+预算。None=不限。
+            req_budget = srv_alloc.get('mem_budget_mb', param_dict.get('mem_mb'))
+            # 记账用边际占用：预算 > 历史边际预估 > 0。用于 committed_mem 上报(T1.1)，不做硬限。
+            acct_mem = int(req_budget or srv_alloc.get('est_mem_mb') or 0)
             leased_cores = cls.core_alloc.lease(req_cores) if cls.core_alloc else None
             if leased_cores:
-                param_dict['_alloc'] = {'core_ids': leased_cores, 'mem_mb': req_mem_mb}
+                param_dict['_alloc'] = {'core_ids': leased_cores, 'mem_budget_mb': req_budget}
             with cls.running_lock:
                 cls.committed_mem_mb += acct_mem
 
