@@ -4,6 +4,7 @@ fetch_blob 是同步封装（内部跑一个 asyncio 事件循环），可直接
 工作线程里调用。返回 {'bytes', 'elapsed', 'dest'} 供监测/打点。
 """
 import asyncio
+import json
 import os
 import ssl
 import time
@@ -24,12 +25,17 @@ class _BlobClientProtocol(QuicConnectionProtocol):
         self._recv = {}      # stream_id -> 收到的字节
         self._waiters = {}   # stream_id -> Future
 
-    async def fetch(self, artifact_id: str) -> bytes:
+    async def fetch(self, artifact_id: str, rate_mbps=None) -> bytes:
         sid = self._quic.get_next_available_stream_id()
         fut = asyncio.get_event_loop().create_future()
         self._waiters[sid] = fut
         self._recv[sid] = bytearray()
-        self._quic.send_stream_data(sid, artifact_id.encode('utf-8'), end_stream=True)
+        # 带限速时发结构化请求（让发送端按 rate_mbps 限速，T5.3）；否则发裸 artifact_id（向后兼容）。
+        if rate_mbps and rate_mbps > 0:
+            req = json.dumps({'id': artifact_id, 'rate_mbps': rate_mbps}).encode('utf-8')
+        else:
+            req = artifact_id.encode('utf-8')
+        self._quic.send_stream_data(sid, req, end_stream=True)
         self.transmit()
         data = await fut
 
@@ -59,7 +65,7 @@ class _BlobClientProtocol(QuicConnectionProtocol):
                     w.set_result(bytes(self._recv.pop(sid, bytearray())))
 
 
-async def _fetch_async(host: str, port: int, artifact_id: str, timeout: float) -> bytes:
+async def _fetch_async(host: str, port: int, artifact_id: str, timeout: float, rate_mbps=None) -> bytes:
     config = QuicConfiguration(is_client=True, alpn_protocols=[ALPN])
     config.verify_mode = ssl.CERT_NONE  # 自签证书，原型阶段不校验
     # 放大流量控制窗口：默认仅 ~1MB，大块产物传输会频繁等待窗口更新。
@@ -67,14 +73,15 @@ async def _fetch_async(host: str, port: int, artifact_id: str, timeout: float) -
     config.max_stream_data = 64 * 1024 * 1024
     async with connect(host, port, configuration=config,
                        create_protocol=_BlobClientProtocol) as protocol:
-        return await asyncio.wait_for(protocol.fetch(artifact_id), timeout)
+        return await asyncio.wait_for(protocol.fetch(artifact_id, rate_mbps), timeout)
 
 
 def fetch_blob(host: str, port: int, artifact_id: str,
-               dest_path: str = None, timeout: float = 120) -> dict:
-    """从 host:port 拉取 artifact_id；若给了 dest_path 则写盘。返回传输统计。"""
+               dest_path: str = None, timeout: float = 120, rate_mbps=None) -> dict:
+    """从 host:port 拉取 artifact_id；若给了 dest_path 则写盘。返回传输统计。
+    rate_mbps>0 时请求发送端按该速率限速（T5.3，供适配优化按任务分配带宽）。"""
     t0 = time.time()
-    data = asyncio.run(_fetch_async(host, port, artifact_id, timeout))
+    data = asyncio.run(_fetch_async(host, port, artifact_id, timeout, rate_mbps))
     elapsed = time.time() - t0
     if dest_path:
         d = os.path.dirname(os.path.abspath(dest_path))

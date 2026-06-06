@@ -46,7 +46,7 @@
 | **T5 资源控制·网络+数据面** | | | | |
 | T5.1 | 传输地基 QUIC `fetch_blob` | 🔴 | ✅ (+ O(n²)吞吐修复) | `network/dataplane/` |
 | T5.2 | 接进 DAG 数据流 | 🔴 | ✅ | `_build_input_artifacts` |
-| T5.3 | 网络限速 | 🔵 | 🔴 | |
+| T5.3 | 网络限速 | 🔵 | ✅ 应用层令牌桶(数据面发送端按块限速)；每条传输可配速率，适配优化接口已留 | `quic_server.RateLimiter` |
 | T5.4 | 多网卡多路径 striping | 🔵研究 | ⚪ | |
 | T5.5 | 迁移到 MPQUIC | ⚪ | ⚪ | |
 | **T6 实验验证** | | | | |

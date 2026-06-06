@@ -4,16 +4,23 @@
 artifact_id，本端把对应的本地文件流式回传。
 
 线协议（一条 QUIC 双向流上）：
-  请求：client 发 artifact_id 的 utf-8 字节，end_stream
+  请求：client 发 artifact_id 的 utf-8 字节，end_stream；
+        或发 JSON {"id": "...", "rate_mbps": R}（R>0 时请求按 R MB/s 限速，T5.3）。
   响应：server 发 [8字节大端长度][文件字节...]，end_stream
         找不到时长度字段为 0xFFFFFFFFFFFFFFFF（哨兵）
 QUIC 流自带边界与可靠有序传输，无需 sleep 防粘包。
+
+T5.3 网络限速：发送端按令牌桶分块限速。生效速率 = min(本次请求速率, 设备出口上限
+OPENSAI_DATA_RATE_MBPS)，0 表示不限（走原整块快速路径）。适配优化(T3.2)只需在派发的
+input_artifacts 里给出 rate_mbps，消费者带进请求即可，无需改这里。
 """
 import asyncio
 import functools
+import json
 import logging
 import os
 import threading
+import time
 
 from aioquic.asyncio import serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -24,6 +31,39 @@ from config.dataplane_config import ALPN, CERT_FILE, DATA_HOST, DATA_PORT, KEY_F
 from network.dataplane.certs import ensure_cert
 
 _NOT_FOUND = (1 << 64) - 1
+_CHUNK = 65536                       # 限速时的分块大小
+# 设备出口带宽上限（MB/s，0=不限）。每台 device 的全局上限；可被更小的"每条传输"速率进一步收紧。
+_DEVICE_RATE_BPS = float(os.environ.get('OPENSAI_DATA_RATE_MBPS', '0') or 0) * 1024 * 1024
+
+
+class RateLimiter:
+    """异步令牌桶：限制把字节交给 QUIC 的速率（从而限制端到端吞吐）。rate<=0 表示不限。"""
+
+    def __init__(self, rate_bps, burst_bytes=None):
+        self.rate = float(rate_bps)
+        self.capacity = float(burst_bytes) if burst_bytes else max(rate_bps * 0.1, _CHUNK)
+        self.tokens = self.capacity
+        self.last = None
+
+    async def acquire(self, n):
+        if self.rate <= 0:
+            return
+        while True:
+            now = time.monotonic()
+            if self.last is None:
+                self.last = now
+            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+            self.last = now
+            if self.tokens >= n:
+                self.tokens -= n
+                return
+            await asyncio.sleep((n - self.tokens) / self.rate)
+
+
+def _effective_rate_bps(req_rate_bps):
+    """请求速率与设备出口上限取交集（都为正取较小者；只有一个为正取它；都不限则 0）。"""
+    rates = [r for r in (req_rate_bps, _DEVICE_RATE_BPS) if r and r > 0]
+    return min(rates) if rates else 0.0
 
 
 class ArtifactServerProtocol(QuicConnectionProtocol):
@@ -41,21 +81,49 @@ class ArtifactServerProtocol(QuicConnectionProtocol):
                 self._reqbuf[sid] = buf
             buf.extend(event.data)
             if event.end_stream:
-                artifact_id = bytes(self._reqbuf.pop(sid, bytearray())).decode('utf-8', 'replace').strip()
-                self._serve(sid, artifact_id)
+                raw = bytes(self._reqbuf.pop(sid, bytearray())).decode('utf-8', 'replace').strip()
+                artifact_id, req_rate_bps = raw, 0.0
+                if raw[:1] == '{':                       # 结构化请求（带限速）
+                    try:
+                        obj = json.loads(raw)
+                        if isinstance(obj, dict) and 'id' in obj:
+                            artifact_id = str(obj['id'])
+                            req_rate_bps = float(obj.get('rate_mbps') or 0) * 1024 * 1024
+                    except (ValueError, TypeError):
+                        pass
+                self._serve(sid, artifact_id, req_rate_bps)
 
-    def _serve(self, stream_id, artifact_id):
+    def _serve(self, stream_id, artifact_id, req_rate_bps=0.0):
+        # 在事件循环里起一个任务做（可能限速的）流式回传。
+        asyncio.ensure_future(self._serve_async(stream_id, artifact_id, req_rate_bps))
+
+    async def _serve_async(self, stream_id, artifact_id, req_rate_bps):
         path = self._registry.get(artifact_id)
-        if path and os.path.exists(path):
-            with open(path, 'rb') as f:
-                data = f.read()
-            payload = len(data).to_bytes(8, 'big') + data
-            logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes)")
-        else:
-            payload = _NOT_FOUND.to_bytes(8, 'big')
+        if not (path and os.path.exists(path)):
+            self._quic.send_stream_data(stream_id, _NOT_FOUND.to_bytes(8, 'big'), end_stream=True)
+            self.transmit()
             logging.warning(f"[dataplane] 未找到 artifact '{artifact_id}'")
-        self._quic.send_stream_data(stream_id, payload, end_stream=True)
+            return
+        with open(path, 'rb') as f:
+            data = f.read()
+        rate = _effective_rate_bps(req_rate_bps)
+        header = len(data).to_bytes(8, 'big')
+        if rate <= 0:
+            # 不限速：原整块快速路径，零额外开销。
+            self._quic.send_stream_data(stream_id, header + data, end_stream=True)
+            self.transmit()
+            logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes, 不限速)")
+            return
+        # 限速：先发长度头，再按令牌桶分块发送。
+        self._quic.send_stream_data(stream_id, header, end_stream=(len(data) == 0))
         self.transmit()
+        limiter = RateLimiter(rate)
+        for i in range(0, len(data), _CHUNK):
+            chunk = data[i:i + _CHUNK]
+            await limiter.acquire(len(chunk))
+            self._quic.send_stream_data(stream_id, chunk, end_stream=(i + _CHUNK >= len(data)))
+            self.transmit()
+        logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes, 限速 {rate/1024/1024:.1f} MB/s)")
 
 
 class ArtifactServer:

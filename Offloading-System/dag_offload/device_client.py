@@ -115,7 +115,9 @@ class DeviceClient:
                     continue
                 local = os.path.join(ARTIFACTS_DIR, f"{task_id}_{pred_id}.in.blob")
                 try:
-                    stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local)
+                    # rate_mbps 由 server 在 input_artifacts 里给出（适配优化按任务分配带宽，T5.3）；None=不限。
+                    stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local,
+                                       rate_mbps=art.get('rate_mbps'))
                     artifact_in[pred_id] = local
                     cls._record_link(art['src_ip'], art['src_port'], stats)
                     logging.info(f"[dataplane] 拉取前驱产物 {art['artifact_id']} 自 "

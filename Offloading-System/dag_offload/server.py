@@ -107,6 +107,19 @@ class UserServer:
         return True
 
     @classmethod
+    def _artifact_rate_mbps(cls, sub_task_info, pred_id):
+        """每条前驱传输的带宽配额(MB/s)，None=不限。
+
+        这是 T5.3 留给适配优化(T3.2 资源档位)的接口：将来在此按任务的通信量/优先级、
+        以及链路/账本，算出该给这条传输多少带宽。当前返回 OPENSAI_FORCE_RATE_MBPS（实验用，
+        强制所有传输限速）或 None（不限）。"""
+        forced = os.environ.get('OPENSAI_FORCE_RATE_MBPS')
+        try:
+            return float(forced) if forced else None
+        except ValueError:
+            return None
+
+    @classmethod
     def _predecessor_info(cls, sub_task_info):
         """返回该子任务各前驱的 (device_no, 实测产出字节数)。
 
@@ -254,6 +267,8 @@ class UserServer:
                     'src_ip': dev.get('ip_address'),
                     'src_port': dev.get('data_port'),
                     'pred_id': p,
+                    # T5.3 带宽配额接口：适配优化(T3.2)在此填每条传输的限速(MB/s)；None=不限。
+                    'rate_mbps': cls._artifact_rate_mbps(sub_task_info, p),
                 })
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")
