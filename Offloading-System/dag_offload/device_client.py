@@ -138,16 +138,22 @@ class DeviceClient:
             )
 
             # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
+            out_bytes = 0
             if cls.artifact_server is not None and os.path.exists(artifact_out):
                 cls.artifact_server.register(f"{task_id}:{node_id}", artifact_out)
+                try:
+                    out_bytes = os.path.getsize(artifact_out)   # 上报产出大小，供 server 自适应放置(T3.2)
+                except OSError:
+                    out_bytes = 0
 
             logging.info(f"任务计算结果： {result_1}")
-            
+
             # 构建响应消息
             msg_dict = {'task_id': data_decode['msg']['task_id'],
                         'sub_task_id': data_decode['msg']['sub_task_id'],
                         'device_no': data_decode['msg']['device_no'],
                         'finished_time': "",
+                        'output_bytes': out_bytes,
                         'result': result_1}
             rsp_dict = {
                 'dag_subtask_rsp': 'dag_subtask_rsp',

@@ -44,6 +44,9 @@ class UserServer:
     # 让放置决策按「真实负载 + 已承诺」选设备，避免把任务都堆到同一台“看起来空闲”的机器（防超卖）。
     # 由 data_lock 保护（offloading_strategy 与 dag_subtask_rsp 处理均在该锁下）。
     reservations = {}
+    # T3.2 自适应放置用：(task_id, node_id) -> 该子任务实测产出字节数（设备在 rsp 中上报）。
+    # 放置下游时按前驱真实数据量估传输代价，从而按数据量自动权衡就近↔分散。
+    output_sizes = {}
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -68,10 +71,10 @@ class UserServer:
             # 对照实验用：强制随机放置（A/B 对比智能放置的收益）。
             device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
         else:
-            # T3.1 位置/资源感知放置（替换原 random）：传入前驱所在设备 + 预留账本。
-            pred_devices = cls._predecessor_devices(subtask)
+            # T3.1/T3.2 自适应放置：传入前驱(设备,实测产出大小) + 预留账本。
+            pred_info = cls._predecessor_info(subtask)
             device_dict = OffloadingImpl.locality_strategy(
-                device_info_list, subtask, pred_devices, cls.reservations)
+                device_info_list, subtask, pred_info, cls.reservations)
         if not device_dict:
             # 当前无在线设备：不分配，保持子任务 READY 等待下一轮重试。
             # （旧代码会直接 set_device_from_dict(None) 抛 TypeError，进而杀死整个卸载线程。）
@@ -87,17 +90,18 @@ class UserServer:
         return True
 
     @classmethod
-    def _predecessor_devices(cls, sub_task_info):
-        """返回该子任务各前驱产出所在的 device_no 列表（未知为 None）。
+    def _predecessor_info(cls, sub_task_info):
+        """返回该子任务各前驱的 (device_no, 实测产出字节数)。
 
         前驱用原始 DAG 的 beforeNodes；前驱产出在哪台机 = 该前驱子任务被放置到的设备
-        （运行期已通过 set_device_info 记录）。这就是 T2.2「数据位置追踪」的来源。"""
+        （T2.2 数据位置追踪）；产出大小来自 output_sizes（设备在 rsp 中上报，T3.2）。
+        前驱必已完成（下游依赖它才就绪），故大小可用；未知则记 0（不计传输代价）。"""
         task_id = sub_task_info.get_task_id()
         node_id = sub_task_info.get_sub_task_id()
         decoded = cls.all_task_decoded.get(task_id)
-        devs = []
+        info = []
         if not decoded:
-            return devs
+            return info
         preds = []
         for node in decoded['dagData']['nodes']:
             if node['id'] == node_id:
@@ -106,10 +110,11 @@ class UserServer:
         for p in preds:
             try:
                 pred_dev = cls.all_task_dict[task_id]["queue"][p - 1].get_device_info()
-                devs.append(pred_dev.get_device_no() if pred_dev else None)
+                dno = pred_dev.get_device_no() if pred_dev else None
             except Exception:
-                devs.append(None)
-        return devs
+                dno = None
+            info.append((dno, cls.output_sizes.get((task_id, p), 0)))
+        return info
 
     @classmethod
     #保存历史记录到redis中
@@ -537,6 +542,8 @@ class UserServer:
                                     _fno = _fdev.get_device_no() if _fdev else None
                                     if _fno and cls.reservations.get(_fno):
                                         cls.reservations[_fno] = max(0, cls.reservations[_fno] - 1)
+                                    # T3.2 记录该子任务实测产出大小，供下游放置按真实数据量估传输代价。
+                                    cls.output_sizes[(task_id, subtask_id)] = data_decode['msg'].get('output_bytes', 0)
 
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成

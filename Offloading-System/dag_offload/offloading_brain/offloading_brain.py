@@ -30,13 +30,15 @@ class OffloadingImpl():
             return cls.random_strategy(device_info_list, subtask_info)
 
 
-    # —— T3.1 位置/资源感知放置 ——
-    # 权衡：本地命中(避免一次跨设备传输)收益远大于负载/链路差异 -> W_LOC 最大。
-    # 三个权重可由环境变量覆盖，便于调参/实验（W_LOAD 越大越倾向分散、越小越倾向聚合）。
-    W_LOC = float(os.environ.get('OPENSAI_W_LOC', '100'))   # 每个「前驱产出已在本机」的本地命中收益
-    W_XFER = float(os.environ.get('OPENSAI_W_XFER', '1'))   # 每 ms 链路时延的传输代价（前驱不在本机时）
-    W_LOAD = float(os.environ.get('OPENSAI_W_LOAD', '5'))   # 负载惩罚权重（=0 则独立任务聚合，>0 则分散）
-    DEFAULT_LINK_MS = 50.0   # 未测过的链路，先假设一个中等代价
+    # —— T3.1/T3.2 自适应位置/资源感知放置 ——
+    # 把「传输代价」按真实数据量估成秒数(时延 + 字节/带宽)，与「负载代价」(W_LOAD 秒/已预留任务)
+    # 一起折算成"预计延迟秒数"，选总代价最低的设备。数据大 -> 传输项主导 -> 自动就近(聚合)；
+    # 数据小 -> 负载项主导 -> 自动铺开(分散)。拐点随数据量自动移动，无需手调权重（这就是 T3.2）。
+    # W_LOAD=0 退化为「纯最小化传输」(聚合)，W_LOAD 很大则强制分散——实验对照用。
+    W_XFER = float(os.environ.get('OPENSAI_W_XFER', '1.0'))            # 传输秒数的权重
+    W_LOAD = float(os.environ.get('OPENSAI_W_LOAD', '0.5'))           # 每个已预留任务折算的延迟秒数
+    DEFAULT_BW_MBPS = float(os.environ.get('OPENSAI_DEFAULT_BW_MBPS', '10.0'))  # 未知链路默认带宽(MB/s)
+    DEFAULT_LAT_MS = 50.0                                             # 未知链路默认时延(ms)
 
     @classmethod
     def _endpoint(cls, dev: dict):
@@ -46,58 +48,46 @@ class OffloadingImpl():
         return None
 
     @classmethod
-    def _link_ms(cls, cand_info: dict, src_dno: str, device_info_list: dict):
-        """候选设备 cand 从源设备 src_dno 拉数据的时延(ms)。
-        用 cand 的被动链路遥测 observed_links[src_endpoint]；没测过则用默认值。"""
+    def _transfer_seconds(cls, cand_info: dict, src_dno: str, nbytes, device_info_list: dict):
+        """候选设备从源设备 src_dno 拉取 nbytes 字节的预计耗时(秒)。
+        用候选设备的链路遥测 observed_links[src_endpoint] 的带宽/时延；未知则用默认值。
+        nbytes<=0（前驱无产出/未知）-> 0。同机前驱由调用方跳过（代价=0=就近收益）。"""
+        if not nbytes or nbytes <= 0:
+            return 0.0
         src = device_info_list.get(src_dno)
-        if not src:
-            return cls.DEFAULT_LINK_MS
-        ep = cls._endpoint(src)
-        st = (cand_info.get('observed_links') or {}).get(ep) if ep else None
-        if st and st.get('last_ms') is not None:
-            return float(st['last_ms'])
-        return cls.DEFAULT_LINK_MS
-
-    @classmethod
-    def _load_penalty(cls, info: dict, reserved: int):
-        """设备负载惩罚：CPU 使用率 + 并发压力(运行中+已预留)/核数 + 内存压力。"""
-        try:
-            cpu = float(str(info.get('used_cpu', '0')).strip('%')) / 100.0
-        except Exception:
-            cpu = 0.0
-        cores = info.get('core_num') or 1
-        running = info.get('work_status') or 0
-        busy = (running + reserved) / max(1, cores)
-        idle = info.get('idle_memory') or 0.0
-        total = info.get('total_memory') or 1.0
-        mem_press = 1.0 - (idle / total if total else 1.0)
-        return cpu + 2.0 * busy + 0.5 * mem_press
+        ep = cls._endpoint(src) if src else None
+        link = (cand_info.get('observed_links') or {}).get(ep) if ep else None
+        if link and link.get('mbps'):
+            bw = float(link['mbps']) * 1e6
+            lat = float(link.get('last_ms', cls.DEFAULT_LAT_MS)) / 1000.0
+        else:
+            bw = cls.DEFAULT_BW_MBPS * 1e6
+            lat = cls.DEFAULT_LAT_MS / 1000.0
+        return lat + nbytes / max(bw, 1.0)
 
     @classmethod
     def locality_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo,
-                          pred_devices=None, reservations=None):
-        """位置感知 + 资源感知放置。
+                          pred_info=None, reservations=None):
+        """T3.2 自适应放置：选「预计传输耗时 + 负载延迟」总代价最低的设备。
 
-        pred_devices: 该子任务各前驱产出所在的 device_no 列表（server 提供，未知为 None）。
-        reservations: 预留账本 {device_no: 已预留任务数}（T2.1）。
-        得分 = W_LOC*本地命中 - W_XFER*Σ(非本地前驱的链路时延) - W_LOAD*负载惩罚；取最高，按 device_no 稳定 tie-break。
-        无前驱时退化为「挑负载最低的设备」。"""
+        pred_info: [(前驱device_no, 前驱实测产出字节数), ...]（同机前驱传输代价=0=就近收益）。
+        reservations: 预留账本 {device_no: 已预留任务数}（T2.1，实时负载信号）。
+        cost(d) = W_XFER*Σ传输秒数(非本机前驱) + W_LOAD*已预留任务数；取最小，按 device_no 稳定 tie-break。"""
         if not device_info_list:
             logging.info("无在线设备...")
             return None
         reservations = reservations or {}
-        pred_set = [d for d in (pred_devices or []) if d]
-        best, best_score = None, None
+        pred_info = pred_info or []
+        best, best_cost = None, None
         for dno in sorted(device_info_list.keys()):
             info = device_info_list[dno]
-            local_hits = sum(1 for d in pred_set if d == dno)
-            xfer = sum(cls._link_ms(info, d, device_info_list) for d in pred_set if d != dno)
-            load = cls._load_penalty(info, reservations.get(dno, 0))
-            score = cls.W_LOC * local_hits - cls.W_XFER * xfer - cls.W_LOAD * load
-            if best_score is None or score > best_score:
-                best_score, best = score, info
-        logging.info(f"[placement] 子任务 {subtask_info.get_sub_task_id()} 选中设备 "
-                     f"{best.get('device_no') if best else None} (score={best_score:.2f}, preds={pred_set})")
+            xfer = sum(cls._transfer_seconds(info, src, b, device_info_list)
+                       for (src, b) in pred_info if src and src != dno)
+            cost = cls.W_XFER * xfer + cls.W_LOAD * reservations.get(dno, 0)
+            if best_cost is None or cost < best_cost:
+                best_cost, best = cost, info
+        logging.info(f"[placement] 子任务 {subtask_info.get_sub_task_id()} -> "
+                     f"{best.get('device_no') if best else None} (cost={best_cost:.3f}s, preds={pred_info})")
         return best
 
     def rl_based_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo):
