@@ -233,7 +233,11 @@ class DeviceClient:
     def _probe_loop(cls):
         """T1.2 主动链路探测：周期性从每个在线对端拉取探测块，测真实带宽/时延，写入
         observed_links。这样即使两台设备之间还没发生过真实产物传输，放置决策也有「先验」
-        链路信息可用（精准放置）。被动遥测与主动探测共用同一 observed_links（EWMA 融合）。"""
+        链路信息可用（精准放置）。被动遥测与主动探测共用同一 observed_links（EWMA 融合）。
+        OPENSAI_PROBE_INTERVAL<=0 时关闭主动探测（实验里需要干净测量时用）。"""
+        if cls.PROBE_INTERVAL <= 0:
+            logging.info("[probe] 主动探测已关闭 (OPENSAI_PROBE_INTERVAL<=0)")
+            return
         recv_path = os.path.join(ARTIFACTS_DIR, '__probe_recv__.blob')
         time.sleep(min(8, cls.PROBE_INTERVAL))   # 先等首个心跳 ACK 把对端清单填好
         while True:

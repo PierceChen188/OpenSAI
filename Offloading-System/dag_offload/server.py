@@ -49,6 +49,10 @@ class UserServer:
     output_sizes = {}
     # 前瞻放置(整图反向就近规划)用：task_id -> {node_id: device_no}，提交后首次放置时整图规划一次并缓存。
     placement_plan = {}
+    # T3.2 资源档位(阶段A·带宽)：committed_bw[device_no] = 该设备当前已承诺的出口带宽(MB/s)；
+    # 分配一条传输即在源设备上扣减预算、完成时归还 -> "可用 = 预算 - 已承诺"（补 T1.1 的带宽侧）。
+    committed_bw = {}
+    bw_reservations = {}   # (task_id, consumer_node_id) -> [(src_device_no, rate_mbps), ...] 供完成时归还
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -107,17 +111,48 @@ class UserServer:
         return True
 
     @classmethod
-    def _artifact_rate_mbps(cls, sub_task_info, pred_id):
-        """每条前驱传输的带宽配额(MB/s)，None=不限。
+    def _artifact_rate_mbps(cls, sub_task_info, src_device_no):
+        """T3.2-A 带宽分配：给「从源设备 src_device_no 拉到本消费者」这条传输分配限速(MB/s)，None=不限。
 
-        这是 T5.3 留给适配优化(T3.2 资源档位)的接口：将来在此按任务的通信量/优先级、
-        以及链路/账本，算出该给这条传输多少带宽。当前返回 OPENSAI_FORCE_RATE_MBPS（实验用，
-        强制所有传输限速）或 None（不限）。"""
+        策略 = min(任务声明的需求, 源设备出口预算 - 已承诺)，地板值 OPENSAI_MIN_BW_MBPS。
+          - 需求：消费者节点 taskInputInfo 里声明的 `bw_mbps`（没声明则不设需求上限）。
+          - 预算：OPENSAI_DEVICE_BW_MBPS（每设备出口，0=不限）。
+        分配即在源设备上记账(committed_bw)，完成时在 dag_subtask_rsp 归还。同机传输(本地直读、不走网络)不分配。
+        OPENSAI_FORCE_RATE_MBPS 若设置则强制该值（实验用）。"""
         forced = os.environ.get('OPENSAI_FORCE_RATE_MBPS')
+        if forced:
+            try:
+                return float(forced)
+            except ValueError:
+                pass
+        # 同机传输不经网络（设备会本地直读），不分配带宽
         try:
-            return float(forced) if forced else None
-        except ValueError:
+            consumer_dev = sub_task_info.get_device_info().get_device_no()
+        except Exception:
+            consumer_dev = None
+        if not src_device_no or src_device_no == consumer_dev:
             return None
+        # 任务声明的带宽需求（上限）
+        demand = None
+        try:
+            d = (sub_task_info.get_sub_task_input_param() or {}).get('bw_mbps')
+            demand = float(d) if d else None
+        except Exception:
+            demand = None
+        budget = float(os.environ.get('OPENSAI_DEVICE_BW_MBPS', '0') or 0)
+        if budget <= 0:
+            rate = demand                      # 无预算：仅受声明需求约束（没声明则不限）
+        else:
+            floor = float(os.environ.get('OPENSAI_MIN_BW_MBPS', '1') or 1)
+            avail = max(floor, budget - cls.committed_bw.get(src_device_no, 0.0))
+            rate = min(demand, avail) if demand else avail
+        if rate and rate > 0:
+            cls.committed_bw[src_device_no] = cls.committed_bw.get(src_device_no, 0.0) + rate
+            key = (sub_task_info.get_task_id(), sub_task_info.get_sub_task_id())
+            cls.bw_reservations.setdefault(key, []).append((src_device_no, rate))
+            logging.info(f"[alloc] 带宽: 源 {src_device_no} 分配 {rate:.2f} MB/s "
+                         f"(已承诺 {cls.committed_bw[src_device_no]:.2f}/{budget or '∞'} MB/s)")
+        return rate
 
     @classmethod
     def _predecessor_info(cls, sub_task_info):
@@ -267,8 +302,8 @@ class UserServer:
                     'src_ip': dev.get('ip_address'),
                     'src_port': dev.get('data_port'),
                     'pred_id': p,
-                    # T5.3 带宽配额接口：适配优化(T3.2)在此填每条传输的限速(MB/s)；None=不限。
-                    'rate_mbps': cls._artifact_rate_mbps(sub_task_info, p),
+                    # T3.2-A：按任务声明 + 源设备带宽预算，分配这条传输的限速(MB/s)；None=不限。
+                    'rate_mbps': cls._artifact_rate_mbps(sub_task_info, pred_dev.get_device_no()),
                 })
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")
@@ -576,6 +611,9 @@ class UserServer:
                                         cls.reservations[_fno] = max(0, cls.reservations[_fno] - 1)
                                     # T3.2 记录该子任务实测产出大小，供下游放置按真实数据量估传输代价。
                                     cls.output_sizes[(task_id, subtask_id)] = data_decode['msg'].get('output_bytes', 0)
+                                    # T3.2-A 归还该子任务此前占用的源设备出口带宽。
+                                    for _s, _rt in cls.bw_reservations.pop((task_id, subtask_id), []):
+                                        cls.committed_bw[_s] = max(0.0, cls.committed_bw.get(_s, 0.0) - _rt)
 
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成
