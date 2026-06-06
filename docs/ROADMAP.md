@@ -37,12 +37,12 @@
 | T2.1 | **预留账本**：分配即扣减，防超卖 | 🔴 | ✅ | `server.reservations` |
 | T2.2 | 数据位置追踪 | 🔴 | ✅ (派发时已知前驱设备) | `_predecessor_devices` |
 | **T3 适配优化（大脑）** | | | | |
-| T3.1 | **位置感知+资源感知放置**（替换 random） | 🔴核心 | ✅ (被动信号版) | `OffloadingImpl.locality_strategy` |
-| T3.2 | 自适应放置权重(按数据量) + 前瞻整图规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重(cost=传输秒数+负载)✅；前瞻整图反向就近规划✅(OPENSAI_PLACEMENT=plan)；资源档位(给多少CPU/带宽)待做 | `locality_strategy` / `plan_dag` |
+| T3.1 | **位置感知+资源感知放置**（替换 random） | 🔴核心 | ✅ 含 capacity-aware(负载按并行容量 worker_slots 折算) | `OffloadingImpl.locality_strategy` |
+| T3.2 | 自适应放置权重(按数据量) + 前瞻整图规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重✅；前瞻整图反向就近规划✅(plan,默认)；capacity-aware✅；**资源档位(给多少CPU/带宽,调用T4.2/T5.3机制)待做** | `locality_strategy` / `plan_dag` |
 | T3.3 | RL 决策 | 🔵 | ⚪ | |
 | **T4 资源控制·算力** | | | | |
 | T4.1 | 工人池化复用 | 🔵 | ✅ 进程池(复用+控并发+真并行)；容器池可选后续 | `dag_offload/task_pool.py` |
-| T4.2 | 算力资源控制(每任务限额) | 🔴 | 🟡 进程池+绑核手环(限CPU,跨平台)✅；内存硬上限 POSIX RLIMIT✅/Windows 待作业对象 | `task_pool` / `run_device.py` |
+| T4.2 | 算力资源控制(每任务限额) | 🔴 | ✅ 进程池+绑核(限CPU,跨平台)；内存硬上限 POSIX RLIMIT + Windows 作业对象 | `task_pool` / `run_device.py` |
 | **T5 资源控制·网络+数据面** | | | | |
 | T5.1 | 传输地基 QUIC `fetch_blob` | 🔴 | ✅ (+ O(n²)吞吐修复) | `network/dataplane/` |
 | T5.2 | 接进 DAG 数据流 | 🔴 | ✅ | `_build_input_artifacts` |
@@ -51,7 +51,7 @@
 | T5.5 | 迁移到 MPQUIC | ⚪ | ⚪ | |
 | **T6 实验验证** | | | | |
 | T6.1 | 多路径聚合对比实验 | 🔵 | ⚪ | |
-| T6.2 | 适配优化效果实验(vs random) | 🔵 | 🔴 | |
+| T6.2 | 适配优化效果实验(vs random) | 🔵 | 🟡 放置 vs random 已多轮量化(3设备&24节点×10设备,-25%~-84%)；带宽/资源档位效果待 T3.2 后做 | `scripts/exp_placement*` |
 | T6.3 | 协同感知 DAG 纳入冒烟测试 | 🔴 | 🟡 demo 有，未并进套件 | `scripts/demo_collab.py` |
 | **T7 应用·协同感知** | | | | |
 | T7.1 | 协同感知算法 `Algorithm_*` | 🔴 | ✅ | `Algorithm_FeatureExtract/Fusion` |
@@ -62,7 +62,7 @@
 ```
 Phase 2a  跑通协同感知    T5.1→T5.2 + T7.1/T7.2              ✅ 完成
 Phase 2b  会看资源/就近放  T1 真监测 → T2.1 账本+T2.2 → T3.1 放置  ◀── 基本完成 (T1.2/T2.1/T2.2/T3.1 已落地; 余 T1.3 接进大脑、T6.2 效果实验)
-Phase 2c  会分配算力带宽   T4.1+T4.2 → T5.3 → T3.2
+Phase 2c  会分配算力带宽   T4.1+T4.2 → T5.3 → T3.2   ◀── 机制就绪(T4.1工人池✅/T4.2算力绑核+内存✅/T5.3网络限速✅)；余 T3.2 资源档位分配(大脑算配额并调用机制)
 Phase 2d  研究层+完整部署  T5.4 多路径 + T6.1 实验 → T3.3 RL → T0.2 跨网
 ```
 
