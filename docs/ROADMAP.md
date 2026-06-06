@@ -38,7 +38,7 @@
 | T2.2 | 数据位置追踪 | 🔴 | ✅ (派发时已知前驱设备) | `_predecessor_devices` |
 | **T3 适配优化（大脑）** | | | | |
 | T3.1 | **位置感知+资源感知放置**（替换 random） | 🔴核心 | ✅ 含 capacity-aware(负载按并行容量 worker_slots 折算) | `OffloadingImpl.locality_strategy` |
-| T3.2 | 自适应放置权重 + 前瞻规划 + 任务画像→资源档位 | 🔵 | ✅ 自适应权重/前瞻(plan默认)/capacity-aware；**资源档位:带宽(A)+CPU核+内存(B) 均落地**(显式声明+默认)；**B2 分配按设备可用核/内存收口**；**B1 算法历史画像(实测峰值内存/耗时 EWMA)→记账可用/已承诺**(内存硬限仍仅显式声明:自动硬限整进程易误杀) | `_artifact_rate_mbps` / `_alloc_compute` / `algo_history` |
+| T3.2 | 自适应放置权重 + 前瞻规划 + 任务画像→资源档位 | 🔵 | ✅ 自适应权重/前瞻(plan默认)/capacity-aware；**资源档位:带宽(A)+CPU核+内存(B) 均落地**；**B2 按设备可用核/内存收口**；**B1 历史画像(EWMA)→记账+自动定档**；**A2 按数据量自动算带宽需求**(免手填)；**B4 内存档=实时提交+任务预算→自动定档安全可用**(OPENSAI_AUTO_MEM)。跳过 A3(被A1取代)/A4(aioquic上限下不生效)/B3(cpu-shares仅Linux) | `_artifact_rate_mbps` / `_alloc_compute` / `algo_history` |
 | T3.3 | RL 决策 | 🔵 | ⚪ | |
 | **T4 资源控制·算力** | | | | |
 | T4.1 | 工人池化复用 | 🔵 | ✅ 进程池(复用+控并发+真并行)；容器池可选后续 | `dag_offload/task_pool.py` |
