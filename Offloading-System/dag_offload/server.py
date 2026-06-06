@@ -135,6 +135,37 @@ class UserServer:
             logging.warning(f"[reclaim] 子任务 {key} 超过 {ttl}s 未完成，回收其设备 {dev} 的预留")
 
     @classmethod
+    def aggregate_monitor_view(cls):
+        """T1.3 server 侧聚合监测视图：把【设备心跳(Redis)】与【大脑自有账本(本 server 进程内存)】
+        合并成一份权威快照。关键：放置预留、已承诺出口带宽、在飞任务、算法历史画像都只在 server
+        内存里(心跳/Redis 里没有)，所以只有 server 能给出"看资源 + 看决策账本"的完整视图。
+        需在 data_lock 下调用(读 reservations/committed_bw/inflight/algo_history)。"""
+        devices = DeviceServiceImpl.read_device_info() or {}
+        view_devs = {}
+        for dno, d in devices.items():
+            ct = int(d.get('cores_total') or 0)
+            cc = int(d.get('cores_committed') or 0)
+            view_devs[dno] = {
+                'used_cpu': d.get('used_cpu'),
+                'idle_memory': d.get('idle_memory'), 'total_memory': d.get('total_memory'),
+                'work_status': d.get('work_status', 0), 'worker_slots': d.get('worker_slots', 1),
+                'cores_total': ct, 'cores_committed': cc, 'cores_available': max(0, ct - cc),
+                'mem_committed_mb': d.get('mem_committed_mb', 0), 'delay': d.get('delay', 0),
+                'data_port': d.get('data_port'), 'ip_address': d.get('ip_address'),
+                'observed_links': d.get('observed_links') or {},
+                # —— 大脑账本(只在 server 内存、Redis 心跳里没有) ——
+                'placement_reserved': int(cls.reservations.get(dno, 0)),               # T2.1 放置预留
+                'bw_committed_mbps': round(float(cls.committed_bw.get(dno, 0.0)), 2),   # T3.2-A 已承诺出口带宽
+            }
+        return {
+            'devices': view_devs,
+            'inflight_tasks': len(cls.inflight),                # C1 在飞(已派发未完成)子任务数
+            'algo_history': {a: {k: (round(v, 1) if isinstance(v, float) else v)
+                                 for k, v in h.items()} for a, h in cls.algo_history.items()},  # B1 画像
+            'ts': time.time(),
+        }
+
+    @classmethod
     def _artifact_rate_mbps(cls, sub_task_info, src_device_no, pred_node_id=None):
         """T3.2-A 带宽分配：给「从源设备 src_device_no 拉到本消费者」这条传输分配限速(MB/s)，None=不限。
 
@@ -331,6 +362,7 @@ class UserServer:
     def offloading_making_process(cls):
         logging.info('The thread for offloading making process start...')
         _last_reclaim = [time.time()]   # C1：上次回收时间（列表以便闭包内可改）
+        _last_view = [0.0]              # T1.3：上次发布聚合监测视图的时间
         while True:
 
             try:
@@ -339,6 +371,16 @@ class UserServer:
                     with cls.data_lock:
                         cls._reclaim_stale_reservations()
                     _last_reclaim[0] = time.time()
+                # T1.3：每 ~5s 发布一次 server 侧聚合监测视图(设备心跳 + 大脑账本)到 Redis，
+                # 供 show_monitor 展示完整画面(含预留/已承诺带宽/在飞/画像)；TTL 30s，server 挂了自动过期。
+                if time.time() - _last_view[0] > 5:
+                    try:
+                        with cls.data_lock:
+                            _view = cls.aggregate_monitor_view()
+                        RedisUtils().set_key_value_with_ttl('OPENSAI_MONITOR_VIEW', json.dumps(_view), 30)
+                    except Exception as _e:
+                        logging.debug(f"[monitor] 发布聚合视图失败: {_e}")
+                    _last_view[0] = time.time()
                 for task_name, task_info in cls.all_task_dict.items():
                     # print(task_name, task_info)
                     for subtask in task_info["queue"]:
