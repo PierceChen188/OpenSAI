@@ -30,7 +30,7 @@
 | T0.1 | 同 LAN 多机连通 | 🔴 | ✅ (真双机待实跑) | `OPENSAI_HOST` |
 | T0.2 | Tailscale 跨 LAN + 认证 | 🔵 | ⚪ | |
 | **T1 监测（地基）** | | | | |
-| T1.1 | 上报「已承诺/可用」算力 | 🔴 | 🟡 work_status/worker_slots 真实化；**带宽已承诺/可用账本✅(T3.2-A)**；核/内存承诺待 Phase B | `device_client` / `server.committed_bw` |
+| T1.1 | 上报「已承诺/可用」算力 | 🔴 | ✅ work_status/worker_slots/RTT 实时；**核·内存·带宽 已承诺/可用 全部上报**(T3.2-A/B) | `device_client` / `server.committed_bw` |
 | T1.2 | 真实网络监测：按路测带宽+时延 | 🔴 | ✅ 被动 + 主动探测(①.2)均已做 | `device_client.observed_links` / `_probe_loop` |
 | T1.3 | server 侧聚合视图 | 🔴 | 🟡 `show_monitor.py`；未接进大脑 | |
 | **T2 决策基础** | | | | |
@@ -38,7 +38,7 @@
 | T2.2 | 数据位置追踪 | 🔴 | ✅ (派发时已知前驱设备) | `_predecessor_devices` |
 | **T3 适配优化（大脑）** | | | | |
 | T3.1 | **位置感知+资源感知放置**（替换 random） | 🔴核心 | ✅ 含 capacity-aware(负载按并行容量 worker_slots 折算) | `OffloadingImpl.locality_strategy` |
-| T3.2 | 自适应放置权重 + 前瞻规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重✅；前瞻✅(plan,默认)；capacity-aware✅；**资源档位-带宽分配✅(T3.2-A,声明+预算+账本,`exp_bw_alloc`)**；CPU/内存档位待 Phase B | `locality_strategy` / `plan_dag` / `_artifact_rate_mbps` |
+| T3.2 | 自适应放置权重 + 前瞻规划 + 任务画像→资源档位 | 🔵 | ✅ 自适应权重/前瞻(plan默认)/capacity-aware；**资源档位:带宽(A)+CPU核+内存(B) 均落地**(显式声明+默认,调用T4.2/T5.3机制)；智能(按计算量/历史自动定档)为后续精进 | `_artifact_rate_mbps` / `CoreAllocator` / `run_task` |
 | T3.3 | RL 决策 | 🔵 | ⚪ | |
 | **T4 资源控制·算力** | | | | |
 | T4.1 | 工人池化复用 | 🔵 | ✅ 进程池(复用+控并发+真并行)；容器池可选后续 | `dag_offload/task_pool.py` |
@@ -62,7 +62,7 @@
 ```
 Phase 2a  跑通协同感知    T5.1→T5.2 + T7.1/T7.2              ✅ 完成
 Phase 2b  会看资源/就近放  T1 真监测 → T2.1 账本+T2.2 → T3.1 放置  ◀── 基本完成 (T1.2/T2.1/T2.2/T3.1 已落地; 余 T1.3 接进大脑、T6.2 效果实验)
-Phase 2c  会分配算力带宽   T4.1+T4.2 → T5.3 → T3.2   ◀── 机制就绪(T4.1工人池✅/T4.2算力绑核+内存✅/T5.3网络限速✅)；余 T3.2 资源档位分配(大脑算配额并调用机制)
+Phase 2c  会分配算力带宽   T4.1+T4.2 → T5.3 → T3.2   ✅ 基本完成 (机制 T4.1工人池/T4.2绑核+内存/T5.3限速 + T3.2 按声明分配 CPU/内存/带宽 均落地; 智能自动定档为后续精进)
 Phase 2d  研究层+完整部署  T5.4 多路径 + T6.1 实验 → T3.3 RL → T0.2 跨网
 ```
 
