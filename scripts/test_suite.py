@@ -40,15 +40,19 @@ def port_in_use(port=8888):
 
 def kill_stale():
     me = os.getpid()
-    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+    # NB: iterate WITHOUT attrs and read name()/cmdline() inside the try. process_iter(attrs=...)
+    # eagerly calls as_dict() during iteration, so a process exiting mid-scan raises OSError
+    # (WinError 87 from ReadProcessMemory) before the loop body -> uncatchable there.
+    for p in psutil.process_iter():
         try:
-            if p.info['pid'] == me:
+            if p.pid == me:
                 continue
-            nm = (p.info['name'] or '').lower()
-            cl = ' '.join(p.info['cmdline'] or [])
-            if 'python' in nm and ('dag_offload' in cl or 'run_tests.py' in cl):
+            if 'python' not in (p.name() or '').lower():
+                continue
+            cl = ' '.join(p.cmdline() or [])
+            if 'dag_offload' in cl or 'run_tests.py' in cl:
                 p.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             pass
 
 
