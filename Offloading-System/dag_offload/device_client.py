@@ -27,6 +27,14 @@ class DeviceClient:
     # 数据面：本机产物服务器（在 activate_client 中启动）
     artifact_server = None
 
+    # —— 监测信号（线程间共享，由心跳线程统一上报到 server/Redis）——
+    running_tasks = 0                 # 当前正在执行的任务数 -> work_status
+    running_lock = threading.Lock()
+    last_hb_sent = 0.0                # 最近一次心跳发送时刻（测 RTT 用）
+    last_rtt_ms = 0.0                 # 最近一次服务器↔设备往返时延(ms)
+    observed_links = {}               # 被动链路遥测: "src_ip:data_port" -> {mbps,last_ms,bytes,samples}
+    links_lock = threading.Lock()
+
     @classmethod
     # def execute_task(cls, algorithm_name, param_dict, data_dict):
     #     result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
@@ -84,6 +92,8 @@ class DeviceClient:
         在独立线程中处理单个任务
         """
         try:
+            with cls.running_lock:
+                cls.running_tasks += 1
             msg = data_decode['msg']
             task_id = msg['task_id']
             node_id = msg['sub_task_id']
@@ -98,6 +108,7 @@ class DeviceClient:
                 try:
                     stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local)
                     artifact_in[pred_id] = local
+                    cls._record_link(art['src_ip'], art['src_port'], stats)
                     logging.info(f"[dataplane] 拉取前驱产物 {art['artifact_id']} 自 "
                                  f"{art['src_ip']}:{art['src_port']} "
                                  f"({stats['bytes']} bytes, {stats['elapsed']:.3f}s)")
@@ -153,6 +164,33 @@ class DeviceClient:
 
         except Exception as e:
             logging.error(f"Error processing task: {e}")
+        finally:
+            with cls.running_lock:
+                cls.running_tasks = max(0, cls.running_tasks - 1)
+
+    @classmethod
+    def _record_link(cls, src_ip, src_port, stats):
+        """被动链路遥测：用一次真实产物拉取的 字节数/耗时 估算到源设备的有效带宽(MB/s)。
+
+        小数据(如 256B 特征)的耗时主要是连接建立/时延，所以这里同时记录 last_ms 作为时延参考；
+        EWMA 平滑多次采样。仅做记录，不影响任务执行。
+        """
+        try:
+            elapsed = float(stats.get('elapsed') or 0.0)
+            nbytes = int(stats.get('bytes') or 0)
+            if elapsed <= 0:
+                return
+            mbps = (nbytes / elapsed) / (1024 * 1024)
+            key = f"{src_ip}:{int(src_port)}"
+            with cls.links_lock:
+                prev = cls.observed_links.get(key, {})
+                a = 0.5  # EWMA 权重
+                mbps_s = mbps if 'mbps' not in prev else a * mbps + (1 - a) * prev['mbps']
+                ms_s = elapsed * 1000 if 'last_ms' not in prev else a * elapsed * 1000 + (1 - a) * prev['last_ms']
+                cls.observed_links[key] = {'mbps': round(mbps_s, 3), 'last_ms': round(ms_s, 2),
+                                           'bytes': nbytes, 'samples': prev.get('samples', 0) + 1}
+        except Exception:
+            pass
 
     @classmethod
     def receive_msg(cls, sock, addr):
@@ -196,7 +234,9 @@ class DeviceClient:
                     else:
                         logging.error(f"[ERR] The receive_msg algorithm is not exist. {data_decode['msg']['algo_name']}")
                 elif NetworkUtils.is_dict(data_decode) and 'SERVER RESPONSE IP' in data_decode:
-                    # 服务器响应心跳
+                    # 服务器响应心跳：收到 ACK 的时刻 - 最近一次心跳发送时刻 = 真实 RTT
+                    if cls.last_hb_sent:
+                        cls.last_rtt_ms = (time.time() - cls.last_hb_sent) * 1000.0
                     logging.info(f"Received server heartbeat response: {data_decode}")
                 else:
                     logging.info(f"Received other message: {data_decode}")
@@ -222,25 +262,27 @@ class DeviceClient:
 
     @classmethod
     def send_heartbeat(cls, sock, addr):
-        device_info = DeviceMonitor.get_physical_device()
-        # 确保心跳包中包含heart_beat标识和device_no字段
-        device_info['heart_beat'] = True
-        device_info['device_no'] = get_gl_device_no()
-        device_info['data_port'] = DATA_PORT  # 数据面端口，供 server 告知后继“去哪拉产物”
-        print(device_info)
-
         while True:
-            # message = "Heartbeat"
-            device_info.update(cls.calculate_network_metrics(sock, addr))
-            device_info_json = json.dumps(device_info)
-            # print(device_info_json)
-            message = device_info_json
+            # 每个心跳都重新采样物理信息，保证 CPU/内存是实时值（get_physical_device 内部
+            # cpu_percent(interval=1) 会阻塞约 1s，相对 10s 心跳间隔可接受）。
+            device_info = DeviceMonitor.get_physical_device()
+            device_info['heart_beat'] = True
+            device_info['device_no'] = get_gl_device_no()
+            device_info['data_port'] = DATA_PORT  # 数据面端口，供 server 告知后继“去哪拉产物”
+            device_info.update(cls.calculate_network_metrics(sock, addr))  # throughput/bandwidth/network_usage 仍为占位
+            # —— 真实监测信号（覆盖占位值）——
+            device_info['work_status'] = cls.running_tasks            # 正在执行的任务数
+            device_info['delay'] = round(cls.last_rtt_ms, 2)          # 服务器↔设备 RTT(ms)
+            with cls.links_lock:
+                device_info['observed_links'] = dict(cls.observed_links)  # 被动链路遥测
+            message = json.dumps(device_info)
             try:
+                cls.last_hb_sent = time.time()
                 sock.send(message.encode('utf-8'))  # TCP: sendto -> send
                 logging.info(f"Sent heartbeat to server: {message}")
             except (socket.error, OSError) as e:
                 # 捕获 socket 相关异常，如 socket 被关闭等
-                logging.info(f"[EXIT] The receive_msg thread is over, Socket error occurred: {e}")
+                logging.info(f"[EXIT] The heartbeat thread is over, Socket error occurred: {e}")
                 break
             time.sleep(10)
 
