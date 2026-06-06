@@ -35,9 +35,13 @@ class ArtifactServerProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             sid = event.stream_id
-            self._reqbuf[sid] = self._reqbuf.get(sid, b'') + event.data
+            buf = self._reqbuf.get(sid)
+            if buf is None:
+                buf = bytearray()
+                self._reqbuf[sid] = buf
+            buf.extend(event.data)
             if event.end_stream:
-                artifact_id = self._reqbuf.pop(sid, b'').decode('utf-8', 'replace').strip()
+                artifact_id = bytes(self._reqbuf.pop(sid, bytearray())).decode('utf-8', 'replace').strip()
                 self._serve(sid, artifact_id)
 
     def _serve(self, stream_id, artifact_id):
@@ -90,6 +94,9 @@ class ArtifactServer:
     async def _serve_forever(self):
         config = QuicConfiguration(is_client=False, alpn_protocols=[ALPN])
         config.load_cert_chain(self.cert_file, self.key_file)
+        # 放大流量控制窗口（默认 ~1MB），与客户端一致，支撑大块产物传输。
+        config.max_data = 256 * 1024 * 1024
+        config.max_stream_data = 64 * 1024 * 1024
         create = functools.partial(ArtifactServerProtocol, registry=self._registry)
         await serve(self.host, self.port, configuration=config, create_protocol=create)
         logging.info(f"[dataplane] ArtifactServer 监听 {self.host}:{self.port}")

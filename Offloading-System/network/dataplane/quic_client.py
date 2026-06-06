@@ -28,7 +28,7 @@ class _BlobClientProtocol(QuicConnectionProtocol):
         sid = self._quic.get_next_available_stream_id()
         fut = asyncio.get_event_loop().create_future()
         self._waiters[sid] = fut
-        self._recv[sid] = b''
+        self._recv[sid] = bytearray()
         self._quic.send_stream_data(sid, artifact_id.encode('utf-8'), end_stream=True)
         self.transmit()
         data = await fut
@@ -46,16 +46,25 @@ class _BlobClientProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             sid = event.stream_id
-            self._recv[sid] = self._recv.get(sid, b'') + event.data
+            # 用 bytearray 累加（摊还 O(1)）。早先用 bytes 拼接是 O(n^2)：32MB 分成上万个
+            # 流片段，每片都复制整个缓冲，几十 GB 内存拷贝 -> 单次传输要 90 秒。
+            buf = self._recv.get(sid)
+            if buf is None:
+                buf = bytearray()
+                self._recv[sid] = buf
+            buf.extend(event.data)
             if event.end_stream:
                 w = self._waiters.pop(sid, None)
                 if w is not None and not w.done():
-                    w.set_result(self._recv.pop(sid, b''))
+                    w.set_result(bytes(self._recv.pop(sid, bytearray())))
 
 
 async def _fetch_async(host: str, port: int, artifact_id: str, timeout: float) -> bytes:
     config = QuicConfiguration(is_client=True, alpn_protocols=[ALPN])
     config.verify_mode = ssl.CERT_NONE  # 自签证书，原型阶段不校验
+    # 放大流量控制窗口：默认仅 ~1MB，大块产物传输会频繁等待窗口更新。
+    config.max_data = 256 * 1024 * 1024
+    config.max_stream_data = 64 * 1024 * 1024
     async with connect(host, port, configuration=config,
                        create_protocol=_BlobClientProtocol) as protocol:
         return await asyncio.wait_for(protocol.fetch(artifact_id), timeout)
