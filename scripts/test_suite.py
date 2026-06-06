@@ -68,6 +68,9 @@ def kill_tree(proc):
 def start(script, env_extra=None, tag='proc'):
     env = dict(os.environ)
     env.update(env_extra or {})
+    # 用轻量启动器拉起设备：让进程池的 worker 在 Windows spawn 时重新 import 的入口足够轻。
+    if script == 'device_client.py':
+        script = 'run_device.py'
     out = open(os.path.join(LOGS, f'{tag}.out.log'), 'w')
     err = open(os.path.join(LOGS, f'{tag}.err.log'), 'w')
     return subprocess.Popen(

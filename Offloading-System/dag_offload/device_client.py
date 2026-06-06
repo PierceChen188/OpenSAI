@@ -16,6 +16,7 @@ from network.utils.network_utils import NetworkUtils
 from network.dataplane.quic_server import ArtifactServer
 from network.dataplane.quic_client import fetch_blob
 from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
+from dag_offload.task_pool import build_pool, run_task
 
 name = "DEVICE_" + get_gl_device_no()
 
@@ -26,6 +27,12 @@ class DeviceClient:
     logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
     # 数据面：本机产物服务器（在 activate_client 中启动）
     artifact_server = None
+
+    # T4.2 算力资源控制：进程池 + 绑核手环（在 activate_client 中构建）。
+    # 任务的算法执行交给池里的 worker（控并发+复用+真并行，每个 worker 钉在一组核上=限算力）；
+    # 池不可用时回退到主进程内执行（execute_task），保证仍能正常运行。
+    pool = None
+    _pool_mgr = None
 
     # —— 监测信号（线程间共享，由心跳线程统一上报到 server/Redis）——
     running_tasks = 0                 # 当前正在执行的任务数 -> work_status
@@ -132,12 +139,17 @@ class DeviceClient:
             artifact_out = os.path.join(ARTIFACTS_DIR, f"{task_id}_{node_id}.blob")
             param_dict['_artifact_out'] = artifact_out
 
-            # 执行算法
-            result_1 = cls.execute_task(
-                algorithm_name,
-                param_dict,
-                msg.get('data_dict', {})
-            )
+            # 执行算法：优先交给进程池的 worker（控并发+真并行+绑核限算力，T4.2）；
+            # 池不可用或执行异常则回退到主进程内执行（execute_task），保证仍能正常出结果。
+            data_dict = msg.get('data_dict', {})
+            if cls.pool is not None:
+                try:
+                    result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
+                except Exception as e:
+                    logging.error(f"[pool] 池内执行失败，回退本地执行: {e}")
+                    result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
+            else:
+                result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
 
             # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
             out_bytes = 0
@@ -361,7 +373,14 @@ class DeviceClient:
           主函数执行方法，通过多线程来实现多个客户端之间的通信
         '''
         # 主线程预加载算法模块：避免子线程首次 import 重型 C 扩展(numpy/torch)在 Windows 上死锁。
+        # （也是进程池不可用时、回退主进程内执行的安全垫。）
         ActuatorImpl.preload_algorithms()
+
+        # T4.2：同步构建算法执行进程池（控并发+复用+真并行+绑核限算力）。
+        # 必须在 asyncio 数据面循环/各线程启动【之前】，从干净的单线程状态 spawn worker——
+        # 否则在 Windows 上与运行中的 IOCP 事件循环并发 spawn 会卡死。build_pool 内含预热超时自检，
+        # 失败/超时则返回 None，任务回退主进程内执行，照常出结果。
+        cls.pool, cls._pool_mgr, _ = build_pool()
 
         # 启动数据面产物服务器（设备间大块数据直传 / QUIC）
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)
