@@ -41,8 +41,8 @@
 | T3.2 | 自适应放置权重(按数据量) + 前瞻整图规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重(cost=传输秒数+负载)✅；前瞻整图反向就近规划✅(OPENSAI_PLACEMENT=plan)；资源档位(给多少CPU/带宽)待做 | `locality_strategy` / `plan_dag` |
 | T3.3 | RL 决策 | 🔵 | ⚪ | |
 | **T4 资源控制·算力** | | | | |
-| T4.1 | 容器池化复用 | 🔵 | 🔴 | |
-| T4.2 | 资源控制接口对齐 | 🔴 | 🔴 (Win 下走本地降级) | |
+| T4.1 | 工人池化复用 | 🔵 | ✅ 进程池(复用+控并发+真并行)；容器池可选后续 | `dag_offload/task_pool.py` |
+| T4.2 | 算力资源控制(每任务限额) | 🔴 | 🟡 进程池+绑核手环(限CPU,跨平台)✅；内存硬上限 POSIX RLIMIT✅/Windows 待作业对象 | `task_pool` / `run_device.py` |
 | **T5 资源控制·网络+数据面** | | | | |
 | T5.1 | 传输地基 QUIC `fetch_blob` | 🔴 | ✅ (+ O(n²)吞吐修复) | `network/dataplane/` |
 | T5.2 | 接进 DAG 数据流 | 🔴 | ✅ | `_build_input_artifacts` |
