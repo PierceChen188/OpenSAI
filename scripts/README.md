@@ -36,6 +36,22 @@ powershell -ExecutionPolicy Bypass -File scripts\smoke_test.ps1
 Submits a pure-Python `Pi -> Sleep` DAG and asserts the pipeline works
 (`Node1` returns ~3.14 and `finishedTime` is a small elapsed value). Exit 0 = PASS.
 
+## Regression test suite (run after any change)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\test_suite.ps1
+```
+
+~25-30s, exit 0 only if all pass. Self-contained — starts its own clean stack
+(server + 2 devices) and tears it down. Covers:
+1. QUIC transport unit test (`test_dataplane.py`)
+2. basic DAG (Pi -> Sleep) — core schedule/dispatch/execute/collect
+3. cross-device data plane (Produce@devA -> QUIC -> Consume@devB, sha match)
+4. fan-in (2 producers -> 1 fusion node fetching from both devices)
+
+Orchestrated by `test_suite.py` (Python subprocess control — robust on Windows).
+The 3 integration scenarios live in `run_tests.py`; add new ones there.
+
 ## Stop
 
 ```powershell
