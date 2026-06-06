@@ -10,9 +10,11 @@ artifact_id，本端把对应的本地文件流式回传。
         找不到时长度字段为 0xFFFFFFFFFFFFFFFF（哨兵）
 QUIC 流自带边界与可靠有序传输，无需 sleep 防粘包。
 
-T5.3 网络限速：发送端按令牌桶分块限速。生效速率 = min(本次请求速率, 设备出口上限
-OPENSAI_DATA_RATE_MBPS)，0 表示不限（走原整块快速路径）。适配优化(T3.2)只需在派发的
-input_artifacts 里给出 rate_mbps，消费者带进请求即可，无需改这里。
+T5.3 网络限速 + A1 出口公平分配：发送端按令牌桶分块限速。每条流的生效速率 =
+min(本次请求速率 rate_mbps, 设备出口公平份额)；其中【设备出口公平份额 = 设备出口预算
+OPENSAI_DATA_RATE_MBPS / 当前活跃受控流数】，随流的加入/结束实时再平分（A1，替代"先到先得、
+每条流各自占满出口"的旧行为——旧法 N 条并发会各占满出口 = N 倍超额）。两者都不限时走原整块
+快速路径。适配优化(T3.2)只需在派发的 input_artifacts 里给出 rate_mbps，消费者带进请求即可。
 """
 import asyncio
 import functools
@@ -32,44 +34,63 @@ from network.dataplane.certs import ensure_cert
 
 _NOT_FOUND = (1 << 64) - 1
 _CHUNK = 65536                       # 限速时的分块大小
-# 设备出口带宽上限（MB/s，0=不限）。每台 device 的全局上限；可被更小的"每条传输"速率进一步收紧。
-_DEVICE_RATE_BPS = float(os.environ.get('OPENSAI_DATA_RATE_MBPS', '0') or 0) * 1024 * 1024
+
+
+class _EgressShare:
+    """设备出口带宽公平分配(A1)：所有【活跃的受控流】动态平分设备出口预算。
+    budget<=0 表示设备出口不限。所有 serve 协程跑在同一事件循环线程内，故计数无需加锁。
+    每条流应得 = budget / 活跃流数（随流的加入/结束实时变化 → 一条结束，其余自动均分更多）。"""
+
+    def __init__(self, budget_bps=None):
+        if budget_bps is None:
+            budget_bps = float(os.environ.get('OPENSAI_DATA_RATE_MBPS', '0') or 0) * 1024 * 1024
+        self.budget = float(budget_bps)
+        self.active = 0
+
+    def join(self):
+        self.active += 1
+
+    def leave(self):
+        self.active = max(0, self.active - 1)
+
+    def fair_share(self):
+        """当前每条活跃流应得出口速率(bps)；budget<=0 时返回 inf(本端不限，仅受每流上限约束)。"""
+        if self.budget <= 0:
+            return float('inf')
+        return self.budget / max(1, self.active)
 
 
 class RateLimiter:
-    """异步令牌桶：限制把字节交给 QUIC 的速率（从而限制端到端吞吐）。rate<=0 表示不限。"""
+    """异步令牌桶：限制把字节交给 QUIC 的速率。rate_fn() 返回【当前】允许速率(bps)，
+    可随设备公平份额动态变化；返回 <=0 或 inf 表示此刻不限。"""
 
-    def __init__(self, rate_bps, burst_bytes=None):
-        self.rate = float(rate_bps)
-        self.capacity = float(burst_bytes) if burst_bytes else max(rate_bps * 0.1, _CHUNK)
-        self.tokens = self.capacity
+    def __init__(self, rate_fn):
+        self.rate_fn = rate_fn if callable(rate_fn) else (lambda r=float(rate_fn): r)
+        self.tokens = 0.0
         self.last = None
 
     async def acquire(self, n):
-        if self.rate <= 0:
-            return
         while True:
+            rate = self.rate_fn()
+            if not rate or rate <= 0 or rate == float('inf'):
+                return                                   # 此刻不限
             now = time.monotonic()
             if self.last is None:
                 self.last = now
-            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+            capacity = max(rate * 0.1, _CHUNK)           # 突发桶随当前速率
+            self.tokens = min(capacity, self.tokens + (now - self.last) * rate)
             self.last = now
             if self.tokens >= n:
                 self.tokens -= n
                 return
-            await asyncio.sleep((n - self.tokens) / self.rate)
-
-
-def _effective_rate_bps(req_rate_bps):
-    """请求速率与设备出口上限取交集（都为正取较小者；只有一个为正取它；都不限则 0）。"""
-    rates = [r for r in (req_rate_bps, _DEVICE_RATE_BPS) if r and r > 0]
-    return min(rates) if rates else 0.0
+            await asyncio.sleep((n - self.tokens) / rate)
 
 
 class ArtifactServerProtocol(QuicConnectionProtocol):
-    def __init__(self, *args, registry=None, **kwargs):
+    def __init__(self, *args, registry=None, share=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._registry = registry if registry is not None else {}
+        self._share = share if share is not None else _EgressShare()  # 设备级出口公平分配(所有连接共用)
         self._reqbuf = {}  # stream_id -> 收到的请求字节
 
     def quic_event_received(self, event):
@@ -106,24 +127,35 @@ class ArtifactServerProtocol(QuicConnectionProtocol):
             return
         with open(path, 'rb') as f:
             data = f.read()
-        rate = _effective_rate_bps(req_rate_bps)
         header = len(data).to_bytes(8, 'big')
-        if rate <= 0:
-            # 不限速：原整块快速路径，零额外开销。
+        flow_cap = req_rate_bps if (req_rate_bps and req_rate_bps > 0) else None   # 每流上限(大脑下发)
+        device_limited = self._share.budget > 0                                   # 设备出口预算(A1平分)
+        if flow_cap is None and not device_limited:
+            # 完全不限：原整块快速路径，零额外开销。
             self._quic.send_stream_data(stream_id, header + data, end_stream=True)
             self.transmit()
             logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes, 不限速)")
             return
-        # 限速：先发长度头，再按令牌桶分块发送。
-        self._quic.send_stream_data(stream_id, header, end_stream=(len(data) == 0))
-        self.transmit()
-        limiter = RateLimiter(rate)
-        for i in range(0, len(data), _CHUNK):
-            chunk = data[i:i + _CHUNK]
-            await limiter.acquire(len(chunk))
-            self._quic.send_stream_data(stream_id, chunk, end_stream=(i + _CHUNK >= len(data)))
+        # 受控：登记为活跃流；速率 = min(每流上限, 设备出口公平份额)，随活跃流数实时变化。
+        self._share.join()
+        try:
+            def rate_fn():
+                fs = self._share.fair_share()
+                return fs if flow_cap is None else min(flow_cap, fs)
+            self._quic.send_stream_data(stream_id, header, end_stream=(len(data) == 0))
             self.transmit()
-        logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes, 限速 {rate/1024/1024:.1f} MB/s)")
+            limiter = RateLimiter(rate_fn)
+            for i in range(0, len(data), _CHUNK):
+                chunk = data[i:i + _CHUNK]
+                await limiter.acquire(len(chunk))
+                self._quic.send_stream_data(stream_id, chunk, end_stream=(i + _CHUNK >= len(data)))
+                self.transmit()
+            eff = rate_fn()
+            note = '不限' if eff == float('inf') else f"{eff / 1024 / 1024:.2f} MB/s"
+            logging.info(f"[dataplane] 提供 artifact '{artifact_id}' ({len(data)} bytes, "
+                         f"出口活跃流={self._share.active}, 速率≈{note})")
+        finally:
+            self._share.leave()
 
 
 class ArtifactServer:
@@ -135,6 +167,7 @@ class ArtifactServer:
         self.cert_file = cert_file or CERT_FILE
         self.key_file = key_file or KEY_FILE
         self._registry = {}            # artifact_id -> 本地文件绝对路径
+        self._share = None             # 设备出口公平分配(A1)，在服务线程内创建后供所有连接共用
         self._thread = None
         self._started = threading.Event()
 
@@ -171,7 +204,8 @@ class ArtifactServer:
         # 放大流量控制窗口（默认 ~1MB），与客户端一致，支撑大块产物传输。
         config.max_data = 256 * 1024 * 1024
         config.max_stream_data = 64 * 1024 * 1024
-        create = functools.partial(ArtifactServerProtocol, registry=self._registry)
+        self._share = _EgressShare()   # 读 OPENSAI_DATA_RATE_MBPS 作为设备出口预算
+        create = functools.partial(ArtifactServerProtocol, registry=self._registry, share=self._share)
         await serve(self.host, self.port, configuration=config, create_protocol=create)
         logging.info(f"[dataplane] ArtifactServer 监听 {self.host}:{self.port}")
         self._started.set()
