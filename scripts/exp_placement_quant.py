@@ -110,19 +110,22 @@ def avg(rows, i):
 
 
 def main():
-    print(f"\n#### Phase A — effect: smart vs random ({TRIALS} trials/cond) ####", flush=True)
+    modes = ('random', 'smart', 'plan')   # smart=贪心自适应; plan=整图反向就近(前瞻)
+    print(f"\n#### Phase A — effect: random vs smart vs plan ({TRIALS} trials/cond) ####", flush=True)
     a = {}
-    for mode in ('random', 'smart'):
+    for mode in modes:
         print(f"\n  [stack] OPENSAI_PLACEMENT={mode}", flush=True)
         a[mode] = run_stack({'OPENSAI_PLACEMENT': mode}, list(REGIMES.keys()))
     print(f"\n  {'regime':<14}{'mode':<8}{'makespan(s)':>12}{'transfers':>11}{'cross_MB':>10}{'spread':>8}{'errs':>6}", flush=True)
     for cname in REGIMES:
-        for mode in ('random', 'smart'):
+        for mode in modes:
             rows = a[mode].get(cname, [])
             print(f"  {cname:<14}{mode:<8}{avg(rows,0):>12.2f}{avg(rows,1):>11.1f}{avg(rows,2):>10.0f}{avg(rows,3):>8.1f}{sum(x[4] for x in rows):>6}", flush=True)
-        rs, ss = a['random'].get(cname, []), a['smart'].get(cname, [])
-        if rs and ss and avg(rs, 0) > 0:
-            print(f"  {'-> smart makespan vs random: ':<30}{(avg(ss,0)/avg(rs,0)-1)*100:+.0f}%", flush=True)
+        rs = a['random'].get(cname, [])
+        for mode in ('smart', 'plan'):
+            ms = a[mode].get(cname, [])
+            if rs and ms and avg(rs, 0) > 0:
+                print(f"  {'-> ' + mode + ' makespan vs random:':<30}{(avg(ms,0)/avg(rs,0)-1)*100:+.0f}%", flush=True)
 
     print(f"\n#### Phase B — tuning: cluster (W_LOAD=0) vs spread (W_LOAD=50) ####", flush=True)
     conds_b = ['compute-heavy', 'network-heavy']

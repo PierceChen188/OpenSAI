@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+from collections import deque
 from task.bean.sub_task_info import SubTaskInfo
 class OffloadingImpl():
 
@@ -89,6 +90,87 @@ class OffloadingImpl():
         logging.info(f"[placement] 子任务 {subtask_info.get_sub_task_id()} -> "
                      f"{best.get('device_no') if best else None} (cost={best_cost:.3f}s, preds={pred_info})")
         return best
+
+    @classmethod
+    def plan_dag(cls, decoded: dict, device_info_list: dict, reservations=None):
+        """前瞻放置：整图「反向就近」规划，一次性给整张 DAG 的每个节点选设备，返回 {node_id: device_no}。
+
+        贪心放置(locality_strategy)只看前驱，所以独立的源节点(传感器)只能按负载铺开，无法为了
+        下游汇聚而预先聚到一起。这里按**倒拓扑序**(消费者先放)处理：放每个节点时，让它偏向其
+        (已放置的)后继所在设备——产出就地被消费=0 传输。这样连源节点都会被"拉"向其消费者，
+        从而吃到贪心够不到的聚合收益。沿用同一成本模型：
+            cost(d) = W_XFER*Σ传输秒数(产出送给非本机后继) + W_LOAD*(已预留 + 本规划已分配)
+        数据大 -> 传输项主导 -> 整条子树聚到消费者处；数据小 -> 负载项主导 -> 铺开抢并行。
+        产出大小用节点声明的 size_mb 估(提交时即可知)；directAllocationId 仍被尊重(固定)。"""
+        reservations = reservations or {}
+        devs = sorted(device_info_list.keys())
+        if not devs:
+            return {}
+        nodes = decoded.get('dagData', {}).get('nodes', [])
+        before, size, direct = {}, {}, {}
+        for nd in nodes:
+            nid = nd['id']
+            form = nd.get('form', {})
+            before[nid] = list(form.get('beforeNodes', []) or [])
+            size[nid] = int(form.get('taskInputInfo', {}).get('size_mb', 0) or 0) * 1024 * 1024
+            direct[nid] = form.get('directAllocationId', -1)
+        succ = {nid: [] for nid in before}
+        for c, preds in before.items():
+            for p in preds:
+                if p in succ:
+                    succ[p].append(c)
+        # 前向拓扑(Kahn) 再反转 = 倒拓扑(后继先于前驱)
+        indeg = {nid: len(before[nid]) for nid in before}
+        q = deque(sorted(n for n in before if indeg[n] == 0))
+        topo = []
+        while q:
+            n = q.popleft()
+            topo.append(n)
+            for c in sorted(succ.get(n, [])):
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    q.append(c)
+        if len(topo) != len(before):     # 异常(有环)则退化为任意稳定序
+            topo = sorted(before)
+        # 祖先/后代集合：用于负载项只统计「独立(可并发)」任务——依赖链上的任务是顺序执行、
+        # 不并发，所以把一条链同机放置不应计并发惩罚（否则会把廉价传输的依赖链错误地拆开）。
+        desc = {n: set() for n in before}
+        for n in reversed(topo):         # sinks first：后继的 desc 已就绪
+            s = set()
+            for c in succ.get(n, []):
+                s.add(c); s |= desc[c]
+            desc[n] = s
+        anc = {n: set() for n in before}
+        for n in topo:                   # sources first：前驱的 anc 已就绪
+            a = set()
+            for p in before.get(n, []):
+                a.add(p); a |= anc[p]
+            anc[n] = a
+        related = {n: desc[n] | anc[n] | {n} for n in before}
+        bw = cls.DEFAULT_BW_MBPS * 1e6
+        lat = cls.DEFAULT_LAT_MS / 1000.0
+        dev, placed_on = {}, {d: [] for d in devs}
+        for n in reversed(topo):         # 倒拓扑：消费者已放，再放它
+            pin = direct.get(n, -1)
+            if isinstance(pin, int) and 1 <= pin <= len(devs):
+                chosen = devs[pin - 1]
+            else:
+                nb = size.get(n, 0)
+                best, best_cost = None, None
+                for d in devs:
+                    xfer = sum(lat + nb / bw
+                               for c in succ.get(n, [])
+                               if nb > 0 and dev.get(c) is not None and dev[c] != d)
+                    # 并发负载 = 该设备上「与 n 独立」的已放置节点数 + 其它任务的预留。
+                    indep = sum(1 for m in placed_on[d] if m not in related[n])
+                    cost = cls.W_XFER * xfer + cls.W_LOAD * (reservations.get(d, 0) + indep)
+                    if best_cost is None or cost < best_cost:
+                        best_cost, best = cost, d
+                chosen = best
+            dev[n] = chosen
+            placed_on[chosen].append(n)
+        logging.info(f"[plan] 整图反向就近规划完成: {dev}")
+        return dev
 
     def rl_based_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo):
         pass

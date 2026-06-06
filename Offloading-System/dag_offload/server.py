@@ -47,6 +47,8 @@ class UserServer:
     # T3.2 自适应放置用：(task_id, node_id) -> 该子任务实测产出字节数（设备在 rsp 中上报）。
     # 放置下游时按前驱真实数据量估传输代价，从而按数据量自动权衡就近↔分散。
     output_sizes = {}
+    # 前瞻放置(整图反向就近规划)用：task_id -> {node_id: device_no}，提交后首次放置时整图规划一次并缓存。
+    placement_plan = {}
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -64,12 +66,26 @@ class UserServer:
         '''
         logging.info('making offloading strategy for subtask')
         device_info_list = DeviceServiceImpl.read_device_info()
+        mode = os.environ.get('OPENSAI_PLACEMENT', 'smart').lower()
         if subtask.get_sub_task_direct_allocate_id() != -1:
             # 手动指定（directAllocationId>0）：保持原行为不变。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
-        elif os.environ.get('OPENSAI_PLACEMENT', 'smart').lower() == 'random':
+        elif mode == 'random':
             # 对照实验用：强制随机放置（A/B 对比智能放置的收益）。
             device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
+        elif mode == 'plan':
+            # 前瞻放置：整图反向就近规划（提交后首次放置时规划一次并缓存）。
+            task_id = subtask.get_task_id()
+            plan = cls.placement_plan.get(task_id)
+            if plan is None:
+                decoded = cls.all_task_decoded.get(task_id)
+                plan = OffloadingImpl.plan_dag(decoded, device_info_list, cls.reservations) if decoded else {}
+                cls.placement_plan[task_id] = plan
+            device_dict = device_info_list.get(plan.get(subtask.get_sub_task_id()))
+            if not device_dict:
+                # 规划的设备已下线/未知 -> 退化为贪心自适应，保证仍能放下去。
+                device_dict = OffloadingImpl.locality_strategy(
+                    device_info_list, subtask, cls._predecessor_info(subtask), cls.reservations)
         else:
             # T3.1/T3.2 自适应放置：传入前驱(设备,实测产出大小) + 预留账本。
             pred_info = cls._predecessor_info(subtask)
@@ -585,6 +601,7 @@ class UserServer:
                                         if all_finished:
                                             # 整个DAG任务已完成
                                             logging.info(f"DAG任务{task_id}总体已完成, 将发送结果报文至client")
+                                            cls.placement_plan.pop(task_id, None)   # 释放前瞻规划缓存
                                             result_dict = cls.summarize_task_result(task_id)
                                             # 发送给对应的用户客户端
                                             for username, addr in user_dict.items():
