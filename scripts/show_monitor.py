@@ -53,12 +53,15 @@ def snapshot():
             ep2label[f"{ip}:{int(dp)}"] = labels[dno]
 
     print("\n=== devices ===", flush=True)
-    print(f"{'dev':<5} {'cpu':>7} {'mem idle/total(GB)':>20} {'running':>8} {'rtt(ms)':>8}  data_port", flush=True)
+    print(f"{'dev':<5} {'cpu':>7} {'mem idle/total(GB)':>20} {'running':>8} "
+          f"{'cores c/t':>10} {'mem_comm(MB)':>13} {'rtt(ms)':>8}  data_port", flush=True)
     for dno in sorted(devices):
         d = devices[dno]
         mem = f"{d.get('idle_memory', '?')}/{d.get('total_memory', '?')}"
+        cores = f"{d.get('cores_committed', 0)}/{d.get('cores_total', '?')}"   # T1.1 已承诺/总 核
         print(f"{labels[dno]:<5} {str(d.get('used_cpu', '?')):>7} {mem:>20} "
-              f"{str(d.get('work_status', 0)):>8} {str(d.get('delay', 0)):>8}  {d.get('data_port', '?')}", flush=True)
+              f"{str(d.get('work_status', 0)):>8} {cores:>10} {str(d.get('mem_committed_mb', 0)):>13} "
+              f"{str(d.get('delay', 0)):>8}  {d.get('data_port', '?')}", flush=True)
 
     print("\n=== observed inter-device links (active probe + passive transfers) ===", flush=True)
     any_link = False

@@ -65,37 +65,42 @@ def _win_set_process_memory_limit(mem_bytes):
         k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         k32.GetCurrentProcess.restype = wintypes.HANDLE
 
-        h = k32.CreateJobObjectW(None, None)
-        if not h:
-            return False
+        if _JOB_HANDLE is None:
+            # 首次：建作业对象并把本进程加入（句柄保活，不关闭）
+            h = k32.CreateJobObjectW(None, None)
+            if not h:
+                return False
+            if not k32.AssignProcessToJobObject(h, k32.GetCurrentProcess()):
+                return False
+            _JOB_HANDLE = h
+        # 设/更新本进程的内存上限（可按任务多次调用以更新档位）
         info = EXT()
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
         info.ProcessMemoryLimit = int(mem_bytes)
-        if not k32.SetInformationJobObject(h, JobObjectExtendedLimitInformation,
-                                           ctypes.byref(info), ctypes.sizeof(info)):
-            return False
-        if not k32.AssignProcessToJobObject(h, k32.GetCurrentProcess()):
-            return False
-        _JOB_HANDLE = h   # 句柄保活
-        return True
+        return bool(k32.SetInformationJobObject(_JOB_HANDLE, JobObjectExtendedLimitInformation,
+                                                ctypes.byref(info), ctypes.sizeof(info)))
     except Exception as e:  # noqa: BLE001
         logging.warning(f"[pool] Windows 内存上限设置失败: {e}")
         return False
+
+
+def _set_process_memory_limit(mem_bytes):
+    """跨平台设/更新当前进程内存上限：Windows 作业对象 / POSIX RLIMIT_AS。"""
+    if sys.platform == 'win32':
+        _win_set_process_memory_limit(mem_bytes)
+    else:
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (int(mem_bytes), int(mem_bytes)))
+        except Exception:
+            pass
 
 
 def _worker_init():
     """每个 worker 进程启动时执行一次：（可选）内存上限 + 预热算法。绑核由主进程事后完成。"""
     mem_mb = int(os.environ.get('OPENSAI_TASK_MEM_MB', '0') or 0)
     if mem_mb > 0:
-        cap = mem_mb * 1024 * 1024
-        if sys.platform == 'win32':
-            _win_set_process_memory_limit(cap)        # 作业对象硬上限
-        else:
-            try:
-                import resource  # Unix-only
-                resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
-            except Exception:
-                pass
+        _set_process_memory_limit(mem_mb * 1024 * 1024)   # worker 级默认上限（可被每任务档位覆盖）
     # 每个 worker 各自在自己的主线程导入重型 C 扩展(numpy/torch)，避免首次在任务子线程导入死锁。
     try:
         from device.implements.actuator_impl import ActuatorImpl
@@ -110,8 +115,19 @@ def _warm():
 
 
 def run_task(algorithm_name, param_dict, data_dict):
-    """在 worker 进程里直接执行算法（进程池+绑核就是资源控制机制，不再走 Docker）。
-    只接收可序列化的 str/dict；输入/输出走磁盘文件路径，已在 param_dict 内。"""
+    """在 worker 进程里执行算法。T3.2-B 每任务资源档位：按主进程注入的 _alloc 给本任务
+    自绑核(限算力) + 设内存上限(限内存)，再执行。只接收可序列化的 str/dict。"""
+    alloc = (param_dict or {}).get('_alloc') or {}
+    core_ids = alloc.get('core_ids')
+    if core_ids:
+        try:
+            import psutil
+            psutil.Process().cpu_affinity(list(core_ids))
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"[pool] 按任务绑核失败 {core_ids}: {e}")
+    mem_mb = alloc.get('mem_mb')
+    if mem_mb:
+        _set_process_memory_limit(int(mem_mb) * 1024 * 1024)
     from device.implements.actuator_impl import ActuatorImpl
     return ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
 

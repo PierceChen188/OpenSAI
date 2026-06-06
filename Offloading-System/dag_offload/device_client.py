@@ -22,6 +22,37 @@ from concurrent.futures.process import BrokenProcessPool
 name = "DEVICE_" + get_gl_device_no()
 
 
+class CoreAllocator:
+    """设备侧 CPU 核租借器(T3.2-B)：任务运行时租 K 个空闲核(disjoint)、跑完归还，
+    主进程把具体核号经 _alloc 传给 worker 去绑核。空闲不足时回退到核 0(软超额、不阻塞)。"""
+
+    def __init__(self, total):
+        self._total = max(1, int(total))
+        self._free = list(range(self._total))
+        self._lock = threading.Lock()
+
+    def lease(self, k):
+        k = max(1, int(k))
+        with self._lock:
+            n = min(k, len(self._free))
+            if n == 0:
+                return [0]                 # 无空闲核：与他人共享 0 号核（软超额）
+            leased = self._free[:n]
+            self._free = self._free[n:]
+            return leased
+
+    def release(self, cores):
+        with self._lock:
+            for c in cores:
+                if 0 <= c < self._total and c not in self._free:
+                    self._free.append(c)
+            self._free.sort()
+
+    def committed(self):
+        with self._lock:
+            return self._total - len(self._free)
+
+
 class DeviceClient:
     # 添加容器管理器实例（支持容器化任务执行和复用）
     container_controller = ResourceControlInterface()
@@ -35,6 +66,8 @@ class DeviceClient:
     pool = None
     _pool_mgr = None
     worker_slots = 1                  # 并行容量(=进程池 worker 数)；供放置做 capacity-aware 负载
+    core_alloc = None                 # T3.2-B CPU 核租借器（activate_client 中按总核数初始化）
+    committed_mem_mb = 0              # T3.2-B 当前已承诺内存(MB)，供上报"已承诺/可用"(T1.1)
 
     # —— 监测信号（线程间共享，由心跳线程统一上报到 server/Redis）——
     running_tasks = 0                 # 当前正在执行的任务数 -> work_status
@@ -141,23 +174,39 @@ class DeviceClient:
             artifact_out = os.path.join(ARTIFACTS_DIR, f"{task_id}_{node_id}.blob")
             param_dict['_artifact_out'] = artifact_out
 
-            # 执行算法：优先交给进程池的 worker（控并发+真并行+绑核限算力，T4.2）；
+            # ---- T3.2-B 每任务资源档位：按声明(或默认)分配 CPU 核 + 内存上限 ----
+            # 核数：节点声明 cores，默认 = 总核/并行槽(≈旧的 worker 槽大小，保持默认行为不变)。
+            default_cores = max(1, (os.cpu_count() or 1) // max(1, cls.worker_slots))
+            req_cores = int(param_dict.get('cores', default_cores) or default_cores)
+            req_mem_mb = param_dict.get('mem_mb')   # None=不限内存
+            leased_cores = cls.core_alloc.lease(req_cores) if cls.core_alloc else None
+            if leased_cores:
+                param_dict['_alloc'] = {'core_ids': leased_cores, 'mem_mb': req_mem_mb}
+            with cls.running_lock:
+                cls.committed_mem_mb += int(req_mem_mb or 0)
+
+            # 执行算法：优先交给进程池的 worker（控并发+真并行+按档位绑核/限内存，T4.2/T3.2-B）；
             # 池不可用或执行异常则回退到主进程内执行（execute_task），保证仍能正常出结果。
             data_dict = msg.get('data_dict', {})
-            if cls.pool is not None:
-                try:
-                    result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
-                except BrokenProcessPool as e:
-                    # 进程池本身坏了（基础设施问题）-> 回退主进程内执行，保证仍能出结果。
-                    logging.error(f"[pool] 进程池损坏，回退本地执行: {e}")
+            try:
+                if cls.pool is not None:
+                    try:
+                        result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
+                    except BrokenProcessPool as e:
+                        logging.error(f"[pool] 进程池损坏，回退本地执行: {e}")
+                        result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
+                    except Exception as e:
+                        # 任务自身异常（超内存 MemoryError、算法报错、超时）：按失败返回，不绕过资源限制。
+                        logging.error(f"[pool] 任务执行异常: {type(e).__name__}: {e}")
+                        result_1 = f"ERROR: {type(e).__name__}: {e}"
+                else:
                     result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
-                except Exception as e:
-                    # 任务自身异常（如超出内存上限 MemoryError、算法报错、超时）：按失败返回，
-                    # 不绕过资源限制改用无限制的本地执行（否则内存硬上限就形同虚设）。
-                    logging.error(f"[pool] 任务执行异常: {type(e).__name__}: {e}")
-                    result_1 = f"ERROR: {type(e).__name__}: {e}"
-            else:
-                result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
+            finally:
+                # 归还核与内存档位
+                if leased_cores and cls.core_alloc:
+                    cls.core_alloc.release(leased_cores)
+                with cls.running_lock:
+                    cls.committed_mem_mb = max(0, cls.committed_mem_mb - int(req_mem_mb or 0))
 
             # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
             out_bytes = 0
@@ -338,6 +387,10 @@ class DeviceClient:
             # —— 真实监测信号（覆盖占位值）——
             device_info['work_status'] = cls.running_tasks            # 正在执行的任务数
             device_info['worker_slots'] = cls.worker_slots            # 并行容量（capacity-aware 放置用）
+            # T1.1 已承诺/可用算力：核(总/已承诺) + 已承诺内存（可用 = 总 − 已承诺，由读取方算）
+            device_info['cores_total'] = os.cpu_count() or 1
+            device_info['cores_committed'] = cls.core_alloc.committed() if cls.core_alloc else 0
+            device_info['mem_committed_mb'] = cls.committed_mem_mb
             device_info['delay'] = round(cls.last_rtt_ms, 2)          # 服务器↔设备 RTT(ms)
             with cls.links_lock:
                 device_info['observed_links'] = dict(cls.observed_links)  # 被动链路遥测
@@ -396,6 +449,8 @@ class DeviceClient:
         cls.pool, cls._pool_mgr, _slices = build_pool()
         # 并行容量：池可用时 = worker 数；否则 1（回退主进程内串行执行）。供放置 capacity-aware。
         cls.worker_slots = len(_slices) if (cls.pool and _slices) else 1
+        # T3.2-B：CPU 核租借器（按本机总核数）。每任务运行时租 K 核、跑完归还。
+        cls.core_alloc = CoreAllocator(os.cpu_count() or 1)
 
         # 启动数据面产物服务器（设备间大块数据直传 / QUIC）
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)
