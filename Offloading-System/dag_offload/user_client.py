@@ -135,13 +135,6 @@ def msg_broker(s):
                 logging.warning(f"broker handle error: {e}")
 
 
-def _poll_basic():
-    """Periodically refresh the algorithm/device caches from the server."""
-    while True:
-        _send({'devicesInfo': 'data'})
-        time.sleep(3)
-
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -183,6 +176,11 @@ def api_basic():
 @app.route('/api/algos', methods=['GET'])
 def api_algos():
     _send({'algorithmsInfo': 'data'})
+    for _ in range(15):                       # wait briefly for the broker to cache the reply
+        with _state_lock:
+            if _state['algorithms']:
+                break
+        time.sleep(0.1)
     with _state_lock:
         return jsonify({'algorithms': _state['algorithms']})
 
@@ -347,8 +345,11 @@ def _connect_and_serve():
     except Exception as e:  # noqa: BLE001
         logging.error(f"Failed to connect to server at {(HOST, PORT)}: {e}")
     sock = s
+    # ONE socket, sends only on user action (user_beat at startup, dagData on submit, *Info on
+    # demand). No periodic poller: the server uses naive recv-per-message framing, so back-to-back
+    # sends can coalesce into one recv and get dropped (then user_beat is lost -> results never
+    # route back). Keeping sends user-paced avoids that; the dashboard reads Redis via /api/monitor.
     threading.Thread(target=msg_broker, args=(s,), daemon=True).start()
-    threading.Thread(target=_poll_basic, daemon=True).start()
 
 
 if __name__ == '__main__':
