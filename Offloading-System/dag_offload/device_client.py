@@ -32,8 +32,11 @@ class DeviceClient:
     running_lock = threading.Lock()
     last_hb_sent = 0.0                # 最近一次心跳发送时刻（测 RTT 用）
     last_rtt_ms = 0.0                 # 最近一次服务器↔设备往返时延(ms)
-    observed_links = {}               # 被动链路遥测: "src_ip:data_port" -> {mbps,last_ms,bytes,samples}
+    observed_links = {}               # 链路遥测(被动+主动): "src_ip:data_port" -> {mbps,last_ms,bytes,samples}
     links_lock = threading.Lock()
+    peers = []                        # 在线对端清单(来自心跳ACK): [{device_no,ip_address,data_port}]
+    PROBE_ID = '__probe__'            # 主动探测用的固定 artifact id
+    PROBE_INTERVAL = int(os.environ.get('OPENSAI_PROBE_INTERVAL', '20'))  # 秒；主动探测间隔
 
     @classmethod
     # def execute_task(cls, algorithm_name, param_dict, data_dict):
@@ -193,6 +196,27 @@ class DeviceClient:
             pass
 
     @classmethod
+    def _probe_loop(cls):
+        """T1.2 主动链路探测：周期性从每个在线对端拉取探测块，测真实带宽/时延，写入
+        observed_links。这样即使两台设备之间还没发生过真实产物传输，放置决策也有「先验」
+        链路信息可用（精准放置）。被动遥测与主动探测共用同一 observed_links（EWMA 融合）。"""
+        recv_path = os.path.join(ARTIFACTS_DIR, '__probe_recv__.blob')
+        time.sleep(min(8, cls.PROBE_INTERVAL))   # 先等首个心跳 ACK 把对端清单填好
+        while True:
+            for peer in list(cls.peers):
+                ip, port = peer.get('ip_address'), peer.get('data_port')
+                if not ip or port is None:
+                    continue
+                try:
+                    stats = fetch_blob(ip, int(port), cls.PROBE_ID, recv_path, timeout=30)
+                    cls._record_link(ip, port, stats)
+                    logging.info(f"[probe] 主动探测 {ip}:{port} "
+                                 f"({stats['bytes']} bytes, {stats['elapsed']:.3f}s)")
+                except Exception as e:
+                    logging.warning(f"[probe] 探测对端 {ip}:{port} 失败: {e}")
+            time.sleep(cls.PROBE_INTERVAL)
+
+    @classmethod
     def receive_msg(cls, sock, addr):
         '''
         接受来自server分发的任务，并调用相关函数进行处理
@@ -237,6 +261,9 @@ class DeviceClient:
                     # 服务器响应心跳：收到 ACK 的时刻 - 最近一次心跳发送时刻 = 真实 RTT
                     if cls.last_hb_sent:
                         cls.last_rtt_ms = (time.time() - cls.last_hb_sent) * 1000.0
+                    # 记录在线对端清单，供主动探测线程使用
+                    if isinstance(data_decode.get('peers'), list):
+                        cls.peers = data_decode['peers']
                     logging.info(f"Received server heartbeat response: {data_decode}")
                 else:
                     logging.info(f"Received other message: {data_decode}")
@@ -327,6 +354,13 @@ class DeviceClient:
         cls.artifact_server = ArtifactServer(port=DATA_PORT)
         cls.artifact_server.start()
         logging.info(f"数据面 ArtifactServer 已启动: 端口 {DATA_PORT}, 产物目录 {ARTIFACTS_DIR}")
+
+        # T1.2 主动探测：提供一个固定大小的探测块，供其它设备测量到本机的链路带宽/时延。
+        probe_path = os.path.join(ARTIFACTS_DIR, '__probe__.blob')
+        with open(probe_path, 'wb') as f:
+            f.write(b'\0' * (4 * 1024 * 1024))   # 4MB，足够压过建连开销、测得有意义的带宽
+        cls.artifact_server.register(cls.PROBE_ID, probe_path)
+        threading.Thread(target=cls._probe_loop, daemon=True).start()
 
         # 创建TCP socket而不是使用CLIENT_SOCK
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # TCP

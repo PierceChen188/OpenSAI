@@ -60,7 +60,7 @@ def snapshot():
         print(f"{labels[dno]:<5} {str(d.get('used_cpu', '?')):>7} {mem:>20} "
               f"{str(d.get('work_status', 0)):>8} {str(d.get('delay', 0)):>8}  {d.get('data_port', '?')}", flush=True)
 
-    print("\n=== observed inter-device links (passive, from real data-plane fetches) ===", flush=True)
+    print("\n=== observed inter-device links (active probe + passive transfers) ===", flush=True)
     any_link = False
     for dno in sorted(devices):
         for ep, st in (devices[dno].get('observed_links') or {}).items():

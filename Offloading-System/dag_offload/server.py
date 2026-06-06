@@ -448,9 +448,19 @@ class UserServer:
                                 cls.client_sockets[device_no] = client_sock
                                 logging.info(f"已记录设备 {device_no} 的连接")
 
-                            # 发送响应
+                            # 发送响应（附带在线对端清单，供设备做 T1.2 主动链路探测）
+                            peers = []
+                            try:
+                                for _dno, _info in (DeviceServiceImpl.read_device_info() or {}).items():
+                                    if _dno != device_no and _info.get('data_port'):
+                                        peers.append({'device_no': _dno,
+                                                      'ip_address': _info.get('ip_address'),
+                                                      'data_port': _info.get('data_port')})
+                            except Exception:
+                                pass
                             client_sock.send(json.dumps(
-                                {"SERVER RESPONSE IP": HOST, "SERVER RESPONSE PORT": PORT}).encode('utf-8'))
+                                {"SERVER RESPONSE IP": HOST, "SERVER RESPONSE PORT": PORT,
+                                 "peers": peers}).encode('utf-8'))
 
                         # 处理用户消息
                         elif 'user_beat' in data_decode:
