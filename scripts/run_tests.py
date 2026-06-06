@@ -1,10 +1,13 @@
 """OpenSAI integration scenarios — run against an already-running stack
 (scripts/test_suite.ps1 starts server + 2 devices, then invokes this).
 
-Scenarios (lightweight, pure-Python algorithms, tiny data — fast):
+Scenarios (mostly lightweight, fast):
   1. basic DAG (Pi -> Sleep)        : core schedule/dispatch/execute/collect
   2. cross-device data plane        : Produce@devA -> QUIC -> Consume@devB, sha match
   3. fan-in (2 producers -> fusion) : Consumer fetches from TWO devices
+  4. locality placement             : unpinned dependent chain co-locates (avoids transfer)
+  5. collab perception (T6.3)       : CIFAR image split L/R -> FeatureExtract on 2 devices
+                                      -> features over QUIC -> Fusion classifies (real model)
 
 Exit 0 only if all scenarios pass.
 """
@@ -157,11 +160,38 @@ def test_locality():
     return True, f'co-located on {pdev} (locality avoided a cross-device transfer)'
 
 
+def test_collab():
+    # T6.3 协同感知冒烟：一张 CIFAR 图按左右两半在两台设备上分别提特征(真实 torch 模型)，
+    # 两份特征经 QUIC 数据面传到 Fusion 节点拼接分类。守住"协同感知 DAG 形状"端到端不被改坏。
+    # (用真实 Algorithm_FeatureExtract/Fusion + 训练好的权重；不断言准确率，只验证管线跑通+跨设备。)
+    res = submit_dag(_dag('t_collab', [
+        _node(1, 'FE_left', 'Algorithm_FeatureExtract', [], [3], 1, {'image_index': 0, 'half': 'left'}),
+        _node(2, 'FE_right', 'Algorithm_FeatureExtract', [], [3], 2, {'image_index': 0, 'half': 'right'}),
+        _node(3, 'Fusion', 'Algorithm_Fusion', [1, 2], [], 1, {}),
+    ]), timeout=90)
+    if not res:
+        return False, 'no dagResult'
+    fe_l, fe_r, fu = _get(res, 'FE_left'), _get(res, 'FE_right'), _get(res, 'Fusion')
+    finfo = str(fu.get('ResultInfo'))
+    m = re.search(r'class=(\d+)', finfo)
+    if not m:
+        return False, f'fusion produced no class (collab pipeline broke): {finfo[:90]}'
+    cls = int(m.group(1))
+    if not (0 <= cls <= 9):
+        return False, f'class out of range: {cls}'
+    ldev = fe_l.get('result', {}).get('deviceId')
+    rdev = fe_r.get('result', {}).get('deviceId')
+    if ldev is None or rdev is None or ldev == rdev:
+        return False, f'features not split across devices: left@{ldev} right@{rdev}'
+    return True, f'collab inference ok: class={cls} (left@{ldev} + right@{rdev} -> fused via data plane)'
+
+
 TESTS = [
     ('basic DAG (Pi->Sleep)', test_basic),
     ('cross-device data plane', test_crossdevice),
     ('fan-in (2 producers -> fusion)', test_fanin),
     ('locality placement (co-locate dependent)', test_locality),
+    ('collab perception (CIFAR split->fuse across devices)', test_collab),
 ]
 
 

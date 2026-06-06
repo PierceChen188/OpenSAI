@@ -52,7 +52,7 @@
 | **T6 实验验证** | | | | |
 | T6.1 | 多路径聚合对比实验 | 🔵 | ⚪ | |
 | T6.2 | 适配优化效果实验(vs random) | 🔵 | 🟡 放置 vs random 已多轮量化(3设备&24节点×10设备,-25%~-84%)；带宽/资源档位效果待 T3.2 后做 | `scripts/exp_placement*` |
-| T6.3 | 协同感知 DAG 纳入冒烟测试 | 🔴 | 🟡 demo 有，未并进套件 | `scripts/demo_collab.py` |
+| T6.3 | 协同感知 DAG 纳入冒烟测试 | 🔴 | ✅ 回归套件第5项: CIFAR图左右半→两设备提特征→QUIC传→Fusion分类(真模型);守住协同感知形状 | `run_tests.test_collab` |
 | **T7 应用·协同感知** | | | | |
 | T7.1 | 协同感知算法 `Algorithm_*` | 🔴 | ✅ | `Algorithm_FeatureExtract/Fusion` |
 | T7.2 | 数据准备(CIFAR) | 🔴 | ✅ | `scripts/train_collab.py` |
