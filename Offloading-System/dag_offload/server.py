@@ -53,6 +53,9 @@ class UserServer:
     # 分配一条传输即在源设备上扣减预算、完成时归还 -> "可用 = 预算 - 已承诺"（补 T1.1 的带宽侧）。
     committed_bw = {}
     bw_reservations = {}   # (task_id, consumer_node_id) -> [(src_device_no, rate_mbps), ...] 供完成时归还
+    # C1 预留泄漏兜底：(task_id, node_id) -> (device_no, 放置时间戳)。完成时移除；超时(任务似已死)由
+    # 卸载线程定期回收其放置预留 + 带宽预留，防止设备崩溃后账本永久虚高。
+    inflight = {}
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -108,7 +111,25 @@ class UserServer:
         dno = device_info.get_device_no()
         if dno:
             cls.reservations[dno] = cls.reservations.get(dno, 0) + 1
+        # C1 记录在飞任务(设备+时间戳)，供超时回收。
+        cls.inflight[(subtask.get_task_id(), subtask.get_sub_task_id())] = (dno, time.time())
         return True
+
+    @classmethod
+    def _reclaim_stale_reservations(cls):
+        """C1：回收超时(疑似设备崩溃、永不上报完成)的在飞任务所占的放置预留与带宽预留。
+        TTL 由 OPENSAI_RESERVATION_TTL 指定(默认 600s)。需在 data_lock 下调用。"""
+        ttl = float(os.environ.get('OPENSAI_RESERVATION_TTL', '600') or 600)
+        now = time.time()
+        for key, (dev, ts) in list(cls.inflight.items()):
+            if now - ts <= ttl:
+                continue
+            if dev and cls.reservations.get(dev):
+                cls.reservations[dev] = max(0, cls.reservations[dev] - 1)
+            for s, rt in cls.bw_reservations.pop(key, []):
+                cls.committed_bw[s] = max(0.0, cls.committed_bw.get(s, 0.0) - rt)
+            cls.inflight.pop(key, None)
+            logging.warning(f"[reclaim] 子任务 {key} 超过 {ttl}s 未完成，回收其设备 {dev} 的预留")
 
     @classmethod
     def _artifact_rate_mbps(cls, sub_task_info, src_device_no):
@@ -248,9 +269,15 @@ class UserServer:
     # 子线程1：遍历 all_task_dict 中的所有子任务队列，将就绪子任务放入 ready_subtask_queue
     def offloading_making_process(cls):
         logging.info('The thread for offloading making process start...')
+        _last_reclaim = [time.time()]   # C1：上次回收时间（列表以便闭包内可改）
         while True:
 
             try:
+                # C1：每 ~30s 回收一次超时未完成任务的预留（防设备崩溃后账本永久虚高）。
+                if time.time() - _last_reclaim[0] > 30:
+                    with cls.data_lock:
+                        cls._reclaim_stale_reservations()
+                    _last_reclaim[0] = time.time()
                 for task_name, task_info in cls.all_task_dict.items():
                     # print(task_name, task_info)
                     for subtask in task_info["queue"]:
@@ -614,6 +641,7 @@ class UserServer:
                                     # T3.2-A 归还该子任务此前占用的源设备出口带宽。
                                     for _s, _rt in cls.bw_reservations.pop((task_id, subtask_id), []):
                                         cls.committed_bw[_s] = max(0.0, cls.committed_bw.get(_s, 0.0) - _rt)
+                                    cls.inflight.pop((task_id, subtask_id), None)   # C1 在飞登记移除
 
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成

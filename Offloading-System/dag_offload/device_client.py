@@ -193,7 +193,14 @@ class DeviceClient:
                     try:
                         result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
                     except BrokenProcessPool as e:
-                        logging.error(f"[pool] 进程池损坏，回退本地执行: {e}")
+                        # 进程池损坏(基础设施故障，罕见)：禁用进程池并降级为主进程内执行。
+                        # 注意：降级后【不再施加每任务核/内存限额】——这里高声告警、并禁用池子(避免后续任务
+                        # 反复撞坏池)，让“限额失效”可见而非静默。(运行时重建池在 Windows 上会与 IOCP 循环
+                        # 并发 spawn 卡死，故不自动重建；需重启设备恢复限额。)
+                        logging.warning(f"[pool] 进程池损坏，禁用并降级为主进程内执行"
+                                        f"（本任务及后续不再受核/内存限额，需重启设备恢复）: {e}")
+                        cls.pool = None
+                        cls.worker_slots = 1
                         result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
                     except Exception as e:
                         # 任务自身异常（超内存 MemoryError、算法报错、超时）：按失败返回，不绕过资源限制。
