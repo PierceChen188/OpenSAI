@@ -66,7 +66,8 @@ class UserServer:
         '''
         logging.info('making offloading strategy for subtask')
         device_info_list = DeviceServiceImpl.read_device_info()
-        mode = os.environ.get('OPENSAI_PLACEMENT', 'smart').lower()
+        # 默认 plan（前瞻整图规划）；设备掉线会自动回退贪心。smart=纯贪心自适应；random=对照。
+        mode = os.environ.get('OPENSAI_PLACEMENT', 'plan').lower()
         if subtask.get_sub_task_direct_allocate_id() != -1:
             # 手动指定（directAllocationId>0）：保持原行为不变。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
