@@ -75,6 +75,12 @@ class ArtifactServer:
         self._registry[artifact_id] = os.path.abspath(file_path)
         logging.info(f"[dataplane] 注册 artifact '{artifact_id}' -> {file_path}")
 
+    def local_path(self, artifact_id: str):
+        """若该 artifact 由本机产出（已注册且文件存在），返回其本地路径，否则 None。
+        供同机前驱「跳过 QUIC、直接本地读」的 locality 优化使用。"""
+        p = self._registry.get(artifact_id)
+        return p if (p and os.path.exists(p)) else None
+
     def start(self, wait=True, timeout=10) -> None:
         ensure_cert(self.cert_file, self.key_file)
         self._thread = threading.Thread(target=self._run_thread, daemon=True)

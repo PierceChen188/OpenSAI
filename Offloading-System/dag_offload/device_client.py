@@ -107,6 +107,12 @@ class DeviceClient:
             artifact_in = {}
             for art in (msg.get('input_artifacts') or []):
                 pred_id = art.get('pred_id')
+                # locality 优化：若该前驱产物就在本机（同机放置），直接本地读，跳过 QUIC 传输。
+                here = cls.artifact_server.local_path(art['artifact_id']) if cls.artifact_server else None
+                if here:
+                    artifact_in[pred_id] = here
+                    logging.info(f"[dataplane] 前驱产物 {art['artifact_id']} 在本机，直接本地读取（跳过传输）")
+                    continue
                 local = os.path.join(ARTIFACTS_DIR, f"{task_id}_{pred_id}.in.blob")
                 try:
                     stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local)
