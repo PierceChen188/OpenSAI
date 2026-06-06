@@ -30,7 +30,7 @@
 | T0.1 | 同 LAN 多机连通 | 🔴 | ✅ (真双机待实跑) | `OPENSAI_HOST` |
 | T0.2 | Tailscale 跨 LAN + 认证 | 🔵 | ⚪ | |
 | **T1 监测（地基）** | | | | |
-| T1.1 | 上报「已承诺/可用」算力 | 🔴 | 🟡 work_status 真实化；承诺侧靠账本 | `device_client` |
+| T1.1 | 上报「已承诺/可用」算力 | 🔴 | 🟡 work_status/worker_slots 真实化；**带宽已承诺/可用账本✅(T3.2-A)**；核/内存承诺待 Phase B | `device_client` / `server.committed_bw` |
 | T1.2 | 真实网络监测：按路测带宽+时延 | 🔴 | ✅ 被动 + 主动探测(①.2)均已做 | `device_client.observed_links` / `_probe_loop` |
 | T1.3 | server 侧聚合视图 | 🔴 | 🟡 `show_monitor.py`；未接进大脑 | |
 | **T2 决策基础** | | | | |
@@ -38,7 +38,7 @@
 | T2.2 | 数据位置追踪 | 🔴 | ✅ (派发时已知前驱设备) | `_predecessor_devices` |
 | **T3 适配优化（大脑）** | | | | |
 | T3.1 | **位置感知+资源感知放置**（替换 random） | 🔴核心 | ✅ 含 capacity-aware(负载按并行容量 worker_slots 折算) | `OffloadingImpl.locality_strategy` |
-| T3.2 | 自适应放置权重(按数据量) + 前瞻整图规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重✅；前瞻整图反向就近规划✅(plan,默认)；capacity-aware✅；**资源档位(给多少CPU/带宽,调用T4.2/T5.3机制)待做** | `locality_strategy` / `plan_dag` |
+| T3.2 | 自适应放置权重 + 前瞻规划 + 任务画像→资源档位 | 🔵 | 🟡 自适应权重✅；前瞻✅(plan,默认)；capacity-aware✅；**资源档位-带宽分配✅(T3.2-A,声明+预算+账本,`exp_bw_alloc`)**；CPU/内存档位待 Phase B | `locality_strategy` / `plan_dag` / `_artifact_rate_mbps` |
 | T3.3 | RL 决策 | 🔵 | ⚪ | |
 | **T4 资源控制·算力** | | | | |
 | T4.1 | 工人池化复用 | 🔵 | ✅ 进程池(复用+控并发+真并行)；容器池可选后续 | `dag_offload/task_pool.py` |
