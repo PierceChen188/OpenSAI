@@ -2,6 +2,19 @@ __all__ = ['Algorithm_Relay']
 
 import hashlib
 import os
+import time
+
+
+def _spin(compute_ms):
+    """占用 CPU 约 compute_ms 毫秒（持有 GIL），用于放置实验体现并行收益。默认 0。"""
+    ms = int(compute_ms or 0)
+    if ms <= 0:
+        return
+    end = time.time() + ms / 1000.0
+    while time.time() < end:
+        for _ in range(20000):
+            pass
+
 
 # 数据面/放置实验用的桩算法：读取系统注入的 _artifact_in（前驱产物），再产出一个
 # size_mb 的新块到 _artifact_out。可作为多级 DAG 的中间节点（既消费上游、又供给下游），
@@ -14,6 +27,7 @@ class Algorithm_Relay:
         self.data = data_dict
 
     def run(self):
+        _spin(self.param.get('compute_ms', 0))
         inputs = self.param.get('_artifact_in') or {}
         out = self.param.get('_artifact_out')
         h = hashlib.sha256()

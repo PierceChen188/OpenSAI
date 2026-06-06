@@ -1,3 +1,4 @@
+import os
 import random
 import logging
 from task.bean.sub_task_info import SubTaskInfo
@@ -31,9 +32,10 @@ class OffloadingImpl():
 
     # —— T3.1 位置/资源感知放置 ——
     # 权衡：本地命中(避免一次跨设备传输)收益远大于负载/链路差异 -> W_LOC 最大。
-    W_LOC = 100.0     # 每个「前驱产出已在本机」的本地命中收益
-    W_XFER = 1.0      # 每 ms 链路时延的传输代价（前驱不在本机时）
-    W_LOAD = 5.0      # 负载惩罚权重
+    # 三个权重可由环境变量覆盖，便于调参/实验（W_LOAD 越大越倾向分散、越小越倾向聚合）。
+    W_LOC = float(os.environ.get('OPENSAI_W_LOC', '100'))   # 每个「前驱产出已在本机」的本地命中收益
+    W_XFER = float(os.environ.get('OPENSAI_W_XFER', '1'))   # 每 ms 链路时延的传输代价（前驱不在本机时）
+    W_LOAD = float(os.environ.get('OPENSAI_W_LOAD', '5'))   # 负载惩罚权重（=0 则独立任务聚合，>0 则分散）
     DEFAULT_LINK_MS = 50.0   # 未测过的链路，先假设一个中等代价
 
     @classmethod
