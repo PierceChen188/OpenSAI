@@ -64,6 +64,9 @@ class UserServer:
         if subtask.get_sub_task_direct_allocate_id() != -1:
             # 手动指定（directAllocationId>0）：保持原行为不变。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
+        elif os.environ.get('OPENSAI_PLACEMENT', 'smart').lower() == 'random':
+            # 对照实验用：强制随机放置（A/B 对比智能放置的收益）。
+            device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
         else:
             # T3.1 位置/资源感知放置（替换原 random）：传入前驱所在设备 + 预留账本。
             pred_devices = cls._predecessor_devices(subtask)
