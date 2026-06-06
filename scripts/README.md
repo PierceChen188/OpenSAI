@@ -52,6 +52,45 @@ powershell -ExecutionPolicy Bypass -File scripts\test_suite.ps1
 Orchestrated by `test_suite.py` (Python subprocess control — robust on Windows).
 The 3 integration scenarios live in `run_tests.py`; add new ones there.
 
+## Collaborative-perception demo (CIFAR-10, cross-device)
+
+A worked example of **协同感知**: one 32×32 image is split into a left and a right
+half; two devices each extract a 64-dim feature with a shared backbone; the features
+travel device→device over the **QUIC data plane**; a fusion node concatenates them
+and classifies. This exercises the real cross-device data path end-to-end.
+
+Prerequisites: torch + torchvision (`scripts\setup.ps1 -Ml`, or
+`pip install -r Offloading-System\requirements-ml.txt`) and the CIFAR-10 dataset in
+`Offloading-System\data\` (git-ignored — download separately).
+
+```powershell
+# 1) train the tiny shared model once (~5s on CPU) -> writes weights to data\ (git-ignored)
+.\.venv\Scripts\python.exe scripts\train_collab.py
+
+# 2) run the demo: starts a clean 2-device stack and classifies N images (default 10)
+.\.venv\Scripts\python.exe scripts\demo_collab.py 10
+```
+
+Expected output (accuracy ≈ the model's held-out ~40%; random baseline = 10%):
+
+```
+=== Collaborative CIFAR-10 inference across 2 devices (10 images) ===
+image#1    true=ship        pred=ship        [OK]  left@dev1 right@dev2
+image#6    true=automobile  pred=automobile  [OK]  left@dev1 right@dev2
+...
+=== accuracy: 4/10 = 40%  (random baseline = 10%) ===
+=== cross-device: 10/10 images had their two halves on different devices ===
+```
+
+The algorithms are ordinary plugins (`Algorithm_FeatureExtract` / `Algorithm_Fusion`
++ shared `collab_model.py`) — adding them required **no change to task dispatch**.
+`demo_collab.py` reuses `test_suite.py`'s stack startup/teardown; `inject_collab.py`
+submits the per-image DAG (FE_left@dev1, FE_right@dev2 → Fusion@dev1) and reports results.
+
+> Heavy algorithms (numpy/torch) are pre-imported on the device's **main thread** at
+> startup (`ActuatorImpl.preload_algorithms()`); without this, the first import inside
+> a task worker thread deadlocks on Windows. New heavy algorithms are auto-warmed.
+
 ## Stop
 
 ```powershell

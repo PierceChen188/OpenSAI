@@ -102,8 +102,10 @@ dag_data = {'dagData': {
 - 更详细的多节点示例（含分支/汇聚）见
   [Offloading-System/dag_offload/README.md](Offloading-System/dag_offload/README.md)。
 
-> ⚠️ 依赖只表示**执行顺序**：跨设备时，上游节点产生的**数据文件不会自动传到下游所在的
-> 另一台设备**。需要数据流水线请用共享存储，详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 的“限制”。
+> 跨设备数据：上游节点写到约定路径 `param_dict['_artifact_out']` 的产物，会经 **QUIC 数据面**
+> 自动拉取到下游节点所在的设备（注入为下游的 `param_dict['_artifact_in']`，是一个 `{前驱id: 本地文件}`
+> 映射）。这正是“协同感知”流水线的基础——可运行示例见 [scripts/README.md](scripts/README.md) 的
+> “Collaborative-perception demo”。（仅依赖关系、不走该约定的普通文件不会自动传输。）
 
 ## 4. 添加自定义算法
 
@@ -146,6 +148,10 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -WithWeb
 .\.venv\Scripts\python.exe -m pip install -r Offloading-System\requirements-ml.txt
 # 并把 CIFAR-10 数据放到 Offloading-System\data\（数据较大，已被 git 忽略）
 ```
+
+**协同感知 demo（跨设备协作，推荐先跑这个看效果）**：把一张 CIFAR 图切成左右两半，
+两台设备各提取特征，特征经 QUIC 数据面传输后融合分类。先 `python scripts\train_collab.py`
+训练一次，再 `python scripts\demo_collab.py 10` 演示。详见 [scripts/README.md](scripts/README.md)。
 
 ## 7. 多机部署
 
