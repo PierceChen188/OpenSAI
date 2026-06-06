@@ -277,6 +277,9 @@ class DeviceClient:
         '''
           主函数执行方法，通过多线程来实现多个客户端之间的通信
         '''
+        # 主线程预加载算法模块：避免子线程首次 import 重型 C 扩展(numpy/torch)在 Windows 上死锁。
+        ActuatorImpl.preload_algorithms()
+
         # 启动数据面产物服务器（设备间大块数据直传 / QUIC）
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)
         cls.artifact_server = ArtifactServer(port=DATA_PORT)
