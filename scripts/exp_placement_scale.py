@@ -102,7 +102,10 @@ def run_stack(server_env, conditions):
     for i in range(N_DEVICES):
         procs.append(ts.start('device_client.py',
                               {'OPENSAI_DATA_PORT': str(BASE_PORT + i),
-                               'OPENSAI_PROBE_INTERVAL': '600'}, f'device{i + 1}'))
+                               'OPENSAI_PROBE_INTERVAL': '600',
+                               'OPENSAI_TASK_WORKERS': '2',      # 2 并行槽/设备（10 设备共 20 worker，启动可控）
+                               'OPENSAI_POOL_WARMUP_S': '40'},   # 并发起池子时给足预热时间，避免误回退
+                              f'device{i + 1}'))
     out = {}
     try:
         t0 = time.time()

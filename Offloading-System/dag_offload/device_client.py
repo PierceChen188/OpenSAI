@@ -33,6 +33,7 @@ class DeviceClient:
     # 池不可用时回退到主进程内执行（execute_task），保证仍能正常运行。
     pool = None
     _pool_mgr = None
+    worker_slots = 1                  # 并行容量(=进程池 worker 数)；供放置做 capacity-aware 负载
 
     # —— 监测信号（线程间共享，由心跳线程统一上报到 server/Redis）——
     running_tasks = 0                 # 当前正在执行的任务数 -> work_status
@@ -325,6 +326,7 @@ class DeviceClient:
             device_info.update(cls.calculate_network_metrics(sock, addr))  # throughput/bandwidth/network_usage 仍为占位
             # —— 真实监测信号（覆盖占位值）——
             device_info['work_status'] = cls.running_tasks            # 正在执行的任务数
+            device_info['worker_slots'] = cls.worker_slots            # 并行容量（capacity-aware 放置用）
             device_info['delay'] = round(cls.last_rtt_ms, 2)          # 服务器↔设备 RTT(ms)
             with cls.links_lock:
                 device_info['observed_links'] = dict(cls.observed_links)  # 被动链路遥测
@@ -380,7 +382,9 @@ class DeviceClient:
         # 必须在 asyncio 数据面循环/各线程启动【之前】，从干净的单线程状态 spawn worker——
         # 否则在 Windows 上与运行中的 IOCP 事件循环并发 spawn 会卡死。build_pool 内含预热超时自检，
         # 失败/超时则返回 None，任务回退主进程内执行，照常出结果。
-        cls.pool, cls._pool_mgr, _ = build_pool()
+        cls.pool, cls._pool_mgr, _slices = build_pool()
+        # 并行容量：池可用时 = worker 数；否则 1（回退主进程内串行执行）。供放置 capacity-aware。
+        cls.worker_slots = len(_slices) if (cls.pool and _slices) else 1
 
         # 启动数据面产物服务器（设备间大块数据直传 / QUIC）
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)

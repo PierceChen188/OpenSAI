@@ -84,7 +84,10 @@ class OffloadingImpl():
             info = device_info_list[dno]
             xfer = sum(cls._transfer_seconds(info, src, b, device_info_list)
                        for (src, b) in pred_info if src and src != dno)
-            cost = cls.W_XFER * xfer + cls.W_LOAD * reservations.get(dno, 0)
+            # capacity-aware：负载按「已预留/并行容量」折算——设备有 N 个 worker 可并行，
+            # 故同机塞到 N 个任务几乎不罚分（它们并行跑），超过容量才显著变贵。
+            slots = max(1, int(info.get('worker_slots', 1) or 1))
+            cost = cls.W_XFER * xfer + cls.W_LOAD * (reservations.get(dno, 0) / slots)
             if best_cost is None or cost < best_cost:
                 best_cost, best = cost, info
         logging.info(f"[placement] 子任务 {subtask_info.get_sub_task_id()} -> "
@@ -147,6 +150,7 @@ class OffloadingImpl():
                 a.add(p); a |= anc[p]
             anc[n] = a
         related = {n: desc[n] | anc[n] | {n} for n in before}
+        slots_of = {d: max(1, int(device_info_list[d].get('worker_slots', 1) or 1)) for d in devs}
         bw = cls.DEFAULT_BW_MBPS * 1e6
         lat = cls.DEFAULT_LAT_MS / 1000.0
         dev, placed_on = {}, {d: [] for d in devs}
@@ -161,9 +165,10 @@ class OffloadingImpl():
                     xfer = sum(lat + nb / bw
                                for c in succ.get(n, [])
                                if nb > 0 and dev.get(c) is not None and dev[c] != d)
-                    # 并发负载 = 该设备上「与 n 独立」的已放置节点数 + 其它任务的预留。
+                    # 并发负载 = 该设备上「与 n 独立」的已放置节点数 + 其它任务的预留，
+                    # 再按并行容量(worker 数)折算——容量内并行不罚分，超容量才变贵(capacity-aware)。
                     indep = sum(1 for m in placed_on[d] if m not in related[n])
-                    cost = cls.W_XFER * xfer + cls.W_LOAD * (reservations.get(d, 0) + indep)
+                    cost = cls.W_XFER * xfer + cls.W_LOAD * ((reservations.get(d, 0) + indep) / slots_of[d])
                     if best_cost is None or cost < best_cost:
                         best_cost, best = cost, d
                 chosen = best
