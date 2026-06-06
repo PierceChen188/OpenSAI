@@ -4,7 +4,7 @@
   - 控并发 + 复用：最多 N 个任务同时算，worker 循环复用（不每任务现开现杀）；
   - 真并行：用进程而非线程，绕开 Python GIL，能真正用多核；
   - 资源控制手环：每个 worker 被**钉在一组 CPU 核上**（cpu_affinity，限算力，跨平台），
-    并可选设内存硬上限（POSIX 的 RLIMIT_AS；Windows 暂无 RLIMIT，留作后续作业对象）。
+    并可选设内存硬上限（POSIX 用 RLIMIT_AS；Windows 用作业对象 Job Object）。
 
 健壮性要点（吃过的坑）：
   - 不用 multiprocessing.Manager 传核分配——Windows spawn 下 worker 连 Manager 代理会卡死；
@@ -129,7 +129,15 @@ def run_task(algorithm_name, param_dict, data_dict):
     if mem_mb:
         _set_process_memory_limit(int(mem_mb) * 1024 * 1024)
     from device.implements.actuator_impl import ActuatorImpl
-    return ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
+    result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
+    # B1：上报本任务峰值内存（worker 进程当前 RSS，含已加载库≈本类任务真实占用），供历史画像。
+    peak_mb = 0.0
+    try:
+        import psutil
+        peak_mb = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
+    except Exception:
+        pass
+    return result, {'peak_mem_mb': peak_mb}
 
 
 def build_pool():

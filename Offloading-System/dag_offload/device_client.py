@@ -174,24 +174,30 @@ class DeviceClient:
             artifact_out = os.path.join(ARTIFACTS_DIR, f"{task_id}_{node_id}.blob")
             param_dict['_artifact_out'] = artifact_out
 
-            # ---- T3.2-B 每任务资源档位：按声明(或默认)分配 CPU 核 + 内存上限 ----
-            # 核数：节点声明 cores，默认 = 总核/并行槽(≈旧的 worker 槽大小，保持默认行为不变)。
+            # ---- T3.2-B 每任务资源档位：核数/内存 优先用大脑下发的 _alloc(server 已按声明/历史/可用算好)，
+            #      否则回退到节点声明，再否则默认(总核/并行槽 ≈ 旧 worker 槽大小，保持默认行为不变) ----
+            srv_alloc = param_dict.get('_alloc') or {}
             default_cores = max(1, (os.cpu_count() or 1) // max(1, cls.worker_slots))
-            req_cores = int(param_dict.get('cores', default_cores) or default_cores)
-            req_mem_mb = param_dict.get('mem_mb')   # None=不限内存
+            req_cores = int(srv_alloc.get('cores') or param_dict.get('cores') or default_cores)
+            req_mem_mb = srv_alloc.get('mem_mb', param_dict.get('mem_mb'))   # 硬上限：仅显式声明才有；None=不限
+            # 记账用「预估占用」：声明上限 > 历史预估 > 0。用于 committed_mem 上报(T1.1)，不做硬限。
+            acct_mem = int(req_mem_mb or srv_alloc.get('est_mem_mb') or 0)
             leased_cores = cls.core_alloc.lease(req_cores) if cls.core_alloc else None
             if leased_cores:
                 param_dict['_alloc'] = {'core_ids': leased_cores, 'mem_mb': req_mem_mb}
             with cls.running_lock:
-                cls.committed_mem_mb += int(req_mem_mb or 0)
+                cls.committed_mem_mb += acct_mem
 
             # 执行算法：优先交给进程池的 worker（控并发+真并行+按档位绑核/限内存，T4.2/T3.2-B）；
             # 池不可用或执行异常则回退到主进程内执行（execute_task），保证仍能正常出结果。
             data_dict = msg.get('data_dict', {})
+            metrics = {}
+            proc_t0 = time.time()
             try:
                 if cls.pool is not None:
                     try:
-                        result_1 = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
+                        _out = cls.pool.submit(run_task, algorithm_name, param_dict, data_dict).result(timeout=300)
+                        result_1, metrics = _out if isinstance(_out, tuple) else (_out, {})
                     except BrokenProcessPool as e:
                         # 进程池损坏(基础设施故障，罕见)：禁用进程池并降级为主进程内执行。
                         # 注意：降级后【不再施加每任务核/内存限额】——这里高声告警、并禁用池子(避免后续任务
@@ -213,7 +219,8 @@ class DeviceClient:
                 if leased_cores and cls.core_alloc:
                     cls.core_alloc.release(leased_cores)
                 with cls.running_lock:
-                    cls.committed_mem_mb = max(0, cls.committed_mem_mb - int(req_mem_mb or 0))
+                    cls.committed_mem_mb = max(0, cls.committed_mem_mb - acct_mem)
+            metrics['proc_secs'] = round(time.time() - proc_t0, 2)   # B1 历史画像：本任务执行耗时
 
             # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
             out_bytes = 0
@@ -232,6 +239,7 @@ class DeviceClient:
                         'device_no': data_decode['msg']['device_no'],
                         'finished_time': "",
                         'output_bytes': out_bytes,
+                        'metrics': metrics,            # B1 历史画像：{peak_mem_mb, proc_secs}
                         'result': result_1}
             rsp_dict = {
                 'dag_subtask_rsp': 'dag_subtask_rsp',

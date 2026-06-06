@@ -56,6 +56,9 @@ class UserServer:
     # C1 预留泄漏兜底：(task_id, node_id) -> (device_no, 放置时间戳)。完成时移除；超时(任务似已死)由
     # 卸载线程定期回收其放置预留 + 带宽预留，防止设备崩溃后账本永久虚高。
     inflight = {}
+    # B1 历史画像：algo_name -> {peak_mem_mb, proc_secs, n}（设备在 rsp 上报 metrics 后 EWMA 更新）。
+    # 供 B2 在任务未显式声明内存时，按历史峰值自动定档。
+    algo_history = {}
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -174,6 +177,46 @@ class UserServer:
             logging.info(f"[alloc] 带宽: 源 {src_device_no} 分配 {rate:.2f} MB/s "
                          f"(已承诺 {cls.committed_bw[src_device_no]:.2f}/{budget or '∞'} MB/s)")
         return rate
+
+    @classmethod
+    def _alloc_compute(cls, sub_task_info, dev_dict):
+        """B1+B2 算力/内存档位决策：返回 {cores, mem_mb, est_mem_mb}。
+          - cores：节点声明 `cores`，否则 OPENSAI_DEFAULT_CORES(>0 时)，否则 None=设备默认槽；按可用核收口(B2)。
+          - mem_mb（硬上限）：仅当节点**显式声明** `mem_mb` 才设；按可用内存收口。
+            注意：内存上限作用于整个 worker 进程(含已加载的 torch ~数百MB)，**自动从历史硬限会贴近基线、
+            轻微波动即误杀**，故 v1 不自动硬限；历史画像(algo_history)改为提供 `est_mem_mb`(预估占用)，
+            仅供账本/放置参考，不强制(B1 安全用法)。"""
+        param = sub_task_info.get_sub_task_input_param() or {}
+        algo = sub_task_info.get_task_algorithm()
+        cores = param.get('cores')
+        if cores is None:
+            d = int(os.environ.get('OPENSAI_DEFAULT_CORES', '0') or 0)
+            cores = d if d > 0 else None
+        mem_mb = param.get('mem_mb')                       # 仅显式声明才硬限内存
+        hist = cls.algo_history.get(algo) or {}
+        est_mem_mb = int(hist['peak_mem_mb']) if hist.get('peak_mem_mb') else None   # B1 历史预估(不强制)
+        if dev_dict:                                        # B2：按可用收口
+            avail_cores = max(1, int(dev_dict.get('cores_total') or os.cpu_count() or 1)
+                              - int(dev_dict.get('cores_committed') or 0))
+            if cores:
+                cores = min(int(cores), avail_cores)
+            idle_mb = float(dev_dict.get('idle_memory') or 0) * 1024
+            if mem_mb and idle_mb > 0:
+                mem_mb = min(int(mem_mb), int(idle_mb * 0.9))
+        return {'cores': cores, 'mem_mb': mem_mb, 'est_mem_mb': est_mem_mb}
+
+    @classmethod
+    def _update_algo_history(cls, algo, metrics):
+        """B1：用设备上报的 metrics(EWMA) 更新算法历史画像。"""
+        if not algo or not isinstance(metrics, dict):
+            return
+        h = cls.algo_history.setdefault(algo, {'peak_mem_mb': 0.0, 'proc_secs': 0.0, 'n': 0})
+        a = 0.5
+        for k in ('peak_mem_mb', 'proc_secs'):
+            v = metrics.get(k)
+            if v:
+                h[k] = float(v) if h['n'] == 0 else a * float(v) + (1 - a) * h[k]
+        h['n'] += 1
 
     @classmethod
     def _predecessor_info(cls, sub_task_info):
@@ -349,6 +392,11 @@ class UserServer:
                     device_info = sub_task_info.get_device_info()
                     # 数据面：构造该子任务需要从前驱设备拉取的产物清单
                     input_artifacts = cls._build_input_artifacts(sub_task_info)
+                    # B1+B2 算力/内存档位：按 声明/历史/所选设备可用 算好 _alloc，注入下发的 param_dict。
+                    _param = sub_task_info.get_sub_task_input_param()
+                    if isinstance(_param, dict):
+                        _devd = (DeviceServiceImpl.read_device_info() or {}).get(device_info.get_device_no())
+                        _param['_alloc'] = cls._alloc_compute(sub_task_info, _devd)
 
                     if sub_task_info.get_sub_task_data_list() is not None:
                         sub_task_data_list = sub_task_info.get_sub_task_data_list()
@@ -642,6 +690,9 @@ class UserServer:
                                     for _s, _rt in cls.bw_reservations.pop((task_id, subtask_id), []):
                                         cls.committed_bw[_s] = max(0.0, cls.committed_bw.get(_s, 0.0) - _rt)
                                     cls.inflight.pop((task_id, subtask_id), None)   # C1 在飞登记移除
+                                    # B1 历史画像：用设备上报的 metrics 更新该算法的峰值内存/耗时。
+                                    cls._update_algo_history(fin_subtask.get_task_algorithm(),
+                                                             data_decode['msg'].get('metrics'))
 
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成
