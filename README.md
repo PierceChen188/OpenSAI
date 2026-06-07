@@ -134,15 +134,15 @@ class Algorithm_Foo:
 > 现成算法：`Algorithm_Pi_Calculation` / `Algorithm_Random` / `Algorithm_Sleep_1`（纯 Python，开箱即用）；
 > `Algorithm_CNN` / `Algorithm_NEW_CNN` / `Algorithm_Train`（需 `torch` + CIFAR-10 数据）。
 
-## 5. 启动 Web 前端（可选）
+## 5. Web 前端（重做中）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -WithWeb
 ```
-浏览器打开 **http://127.0.0.1:5000** 。当前前端是已编译的静态包
-（`dag_offload/static/` + `templates/index.html`），由 `user_client.py`（Flask）提供。
+启动后 `user_client.py`（Flask，:5000）提供**后端 API 桥接**；**旧编译前端已移除**，
+访问 **http://127.0.0.1:5000** 当前只是一个占位页。
 
-> **前端正在重做。** 完整的前端需求清单、要实现的功能、以及与后端对接的接口/数据格式规格，
+> **新前端正在重做。** 完整的功能需求清单、以及与后端对接的接口/数据格式规格，
 > 见 **[docs/FRONTEND_REQUIREMENTS.md](docs/FRONTEND_REQUIREMENTS.md)**（给前端设计师/工程师上手用）。
 
 ## 6. 跑深度学习算法（可选）

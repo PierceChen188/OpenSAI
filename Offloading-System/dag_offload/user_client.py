@@ -108,7 +108,15 @@ def allowed_file(filename):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    # The first-version SPA was removed; a new frontend will be built (see docs/FRONTEND_REQUIREMENTS.md).
+    # The backend API (this bridge) below stays available. Serve a minimal English placeholder.
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>OpenSAI</title></head>'
+            '<body style="font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:640px;'
+            'margin:80px auto;padding:0 20px;color:#222;line-height:1.6">'
+            '<h2>OpenSAI</h2>'
+            '<p>The web frontend is being rebuilt. The backend API (this bridge) is running.</p>'
+            '<p>Frontend spec: <code>docs/FRONTEND_REQUIREMENTS.md</code>.</p>'
+            '</body></html>')
 
 # 处理 GET 请求
 @app.route('/api/status', methods=['GET'])
