@@ -3,7 +3,7 @@
 > 本目录是 OpenSAI 主系统。**使用指南和架构说明请看仓库根目录的文档**，不要以本文件为准：
 >
 > - 使用 / 快速上手：[../README.md](../README.md)
-> - Web 控制台使用说明：[../docs/CONSOLE.md](../docs/CONSOLE.md)
+> - 前端需求与接口规格（重做中）：[../docs/FRONTEND_REQUIREMENTS.md](../docs/FRONTEND_REQUIREMENTS.md)
 > - 系统架构与功能：[../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
 > - 路线图与进度：[../docs/ROADMAP.md](../docs/ROADMAP.md)
 

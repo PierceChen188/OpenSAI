@@ -134,16 +134,16 @@ class Algorithm_Foo:
 > 现成算法：`Algorithm_Pi_Calculation` / `Algorithm_Random` / `Algorithm_Sleep_1`（纯 Python，开箱即用）；
 > `Algorithm_CNN` / `Algorithm_NEW_CNN` / `Algorithm_Train`（需 `torch` + CIFAR-10 数据）。
 
-## 5. 启动 Web 控制台（推荐）
+## 5. 启动 Web 前端（可选）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run.ps1 -WithWeb
 ```
-浏览器打开 **http://127.0.0.1:5000** 进入 **OpenSAI Console**：实时集群监控（含大脑账本）、
-可视化编排并提交 DAG、查看放置/执行结果、在线调系统参数、管理算法。单文件前端
-（`dag_offload/static/console.html`，无构建、不依赖外网），由 `user_client.py`（Flask）提供。
-**详细图文使用说明见 [docs/CONSOLE.md](docs/CONSOLE.md)。** 旧版编译前端保留在
-**http://127.0.0.1:5000/legacy** 。
+浏览器打开 **http://127.0.0.1:5000** 。当前前端是已编译的静态包
+（`dag_offload/static/` + `templates/index.html`），由 `user_client.py`（Flask）提供。
+
+> **前端正在重做。** 完整的前端需求清单、要实现的功能、以及与后端对接的接口/数据格式规格，
+> 见 **[docs/FRONTEND_REQUIREMENTS.md](docs/FRONTEND_REQUIREMENTS.md)**（给前端设计师/工程师上手用）。
 
 ## 6. 跑深度学习算法（可选）
 
@@ -236,7 +236,7 @@ opensai-master/
 
 ## 11. 文档与版本
 
-- Web 控制台使用说明：[docs/CONSOLE.md](docs/CONSOLE.md)
+- 前端需求与后端接口规格（重做中）：[docs/FRONTEND_REQUIREMENTS.md](docs/FRONTEND_REQUIREMENTS.md)
 - 架构与 Phase 2 实现详解：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（§11–§15）
 - 路线图与进度：[docs/ROADMAP.md](docs/ROADMAP.md)
 - 脚本 / 演示 / 实验：[scripts/README.md](scripts/README.md)

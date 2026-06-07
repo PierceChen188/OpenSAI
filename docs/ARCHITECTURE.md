@@ -2,7 +2,7 @@
 
 本文说明 OpenSAI 的整体架构、各组件职责、运行时数据流、通信协议、任务模型，
 以及**当前能做什么 / 还不能做什么**。配套文档：
-[README.md](../README.md)（使用）、[CONSOLE.md](CONSOLE.md)（Web 控制台）、
+[README.md](../README.md)（使用）、[FRONTEND_REQUIREMENTS.md](FRONTEND_REQUIREMENTS.md)（前端需求/接口规格）、
 [ROADMAP.md](ROADMAP.md)（Phase 2 路线图与进度）。
 
 > **⚠️ Phase 2 进展提示（§1–§10 是 v1.1.2 基线，多处已被超越）**：此后 Phase 2 已落地——
