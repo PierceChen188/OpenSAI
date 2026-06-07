@@ -5,15 +5,17 @@ Why the big experiment showed only ~-4% in compute-heavy: the devices were homog
 (random spreads ~evenly -> no straggler) and the stub compute is single-core (so the
 core-allocation lever is inert). Here we make capacity the bottleneck:
 
-  2 STRONG devices (OPENSAI_TASK_WORKERS=3) + 2 WEAK devices (OPENSAI_TASK_WORKERS=1).
+  1 STRONG device (OPENSAI_TASK_WORKERS=3) + 1 WEAK device (OPENSAI_TASK_WORKERS=1).
   A wide layer of N single-core compute tasks (compute_ms each, ~0 data) -> 1 sink.
-  (single-core busy-work -> N<=~30 of them fit the host's 32 cores with no physical contention,
-   so the only thing that matters is how many tasks queue behind too-few worker slots.)
+  (single-core busy-work -> all fit the host's cores with no physical contention, so the only
+   thing that matters is how many tasks queue behind too-few worker slots.)
 
-  random     : ignores capacity -> ~N/6 tasks/device -> each WEAK device runs its share
-               SERIALLY through its single slot -> weak devices are stragglers -> long makespan.
-  smart/plan : capacity-aware (cost ~ reserved/worker_slots) -> sends ~4x more to STRONG
-               devices, few to WEAK -> balanced finish -> short makespan.
+  random     : ignores capacity -> ~N/2 tasks/device -> the WEAK device runs its ~half
+               SERIALLY through its single slot -> it is the straggler -> long makespan.
+  smart/plan : capacity-aware (cost ~ reserved/worker_slots) -> sends ~3x more to the STRONG
+               device, few to WEAK -> balanced finish -> short makespan.
+  (Kept to a 2-device stack: building >2 worker pools on this single host intermittently
+   deadlocks the Windows multiprocessing spawn; 1 strong + 1 weak still shows the effect.)
 
 Metrics: makespan (lower=better), tasks placed on WEAK(1-slot) devices (lower=smarter),
 distinct devices, errors (=0).
@@ -41,7 +43,7 @@ from config.common_redis_key_constant import ComRedisKeyConstant as KEY   # noqa
 TRIALS = int(sys.argv[1]) if len(sys.argv) > 1 else 2
 N_TASKS = 16
 COMPUTE_MS = 800
-N_STRONG, N_WEAK = 2, 2             # strong=4 worker slots, weak=1 worker slot
+N_STRONG, N_WEAK = 1, 1             # 1 strong (3 slots) + 1 weak (1 slot); 2-device stack is reliable here
 N_DEVICES = N_STRONG + N_WEAK
 
 
@@ -105,20 +107,20 @@ def run_stack(mode, base_port):
     # Stagger device launches (each builds a torch-preloading worker pool synchronously before
     # registering -> starting several heavy pools at once is a spawn storm). Distinct port range
     # per stack avoids racing the previous stack's not-yet-freed data ports.
-    devspec = ([(base_port + i, '3') for i in range(N_STRONG)] +    # strong = 3 slots (workers=4 hangs Windows spawn)
+    devspec = ([(base_port + i, '3') for i in range(N_STRONG)] +    # strong = 3 slots
                [(base_port + N_STRONG + i, '1') for i in range(N_WEAK)])
-    # Launch devices ONE AT A TIME, waiting for each to register before the next. Each device
-    # builds its worker pool SYNCHRONOUSLY before registering; building several pools at once
-    # can deadlock the Windows multiprocessing spawn machinery (a device then hangs with no log).
-    # Serializing the builds avoids that entirely.
-    for k, (p, w) in enumerate(devspec, start=1):
+    # Launch all devices back-to-back, then wait for all to register -- exactly the regression's
+    # proven-reliable 2-device startup. (Per-device SERIALIZED waiting was worse here: it left a
+    # fully-built idle pool up while the next device's pool spawned, which intermittently
+    # deadlocked the Windows multiprocessing spawn.)
+    for p, w in devspec:
         procs.append(ts.start('device_client.py', {'OPENSAI_DATA_PORT': str(p), 'OPENSAI_PROBE_INTERVAL': '600',
                               'OPENSAI_TASK_WORKERS': w, 'OPENSAI_POOL_WARMUP_S': '45'}, f'dev{p}'))
-        t0 = time.time()
-        while int(r.scard('DEVICE_ONLINE_SET')) < k and time.time() - t0 < 75:
-            time.sleep(1)
     rows = []
     try:
+        t0 = time.time()
+        while int(r.scard('DEVICE_ONLINE_SET')) < N_DEVICES and time.time() - t0 < 90:
+            time.sleep(2)
         online = int(r.scard('DEVICE_ONLINE_SET'))
         time.sleep(5)
         slots = read_slots(r)
