@@ -139,5 +139,3 @@ powershell -ExecutionPolicy Bypass -File scripts\stop.ps1 -All   # also stop Red
   in-process execution. Docker (`resource_control_interface.py`) is an optional/legacy path.
 - ML algorithms (`Algorithm_CNN/NEW_CNN/Train`) additionally need the CIFAR-10
   dataset under `Offloading-System\data\` (git-ignored — download separately).
-- The 1.0 reference baseline lives in `opensai_1.0\` (git-ignored). Compare:
-  `git diff --no-index opensai_1.0\Offloading-System Offloading-System`
