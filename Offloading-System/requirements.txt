@@ -21,6 +21,11 @@ flask-cors==6.0.2
 # --- Device monitoring / resource limiting ---
 psutil==7.2.2
 PyYAML==6.0.3
+# threadpoolctl: align BLAS/OpenMP thread count to the per-task CPU-core budget (B2).
+# Without it, cpu_affinity pins cores but numpy/torch still spawn ~ncores threads that
+# thrash the pinned subset (matmul gets SLOWER, not faster). Optional: run_task falls back
+# to affinity-only if it's missing, but per-task core allocation won't speed up BLAS compute.
+threadpoolctl==3.6.0
 
 # --- Data plane: device-to-device bulk transfer over QUIC (Phase 2a) ---
 # Used by network/dataplane/ (ArtifactServer + fetch_blob). Pulls in `cryptography`.

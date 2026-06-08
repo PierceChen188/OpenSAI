@@ -150,7 +150,21 @@ def run_task(algorithm_name, param_dict, data_dict):
     elif abs_mb:
         _set_process_memory_limit(int(abs_mb) * 1024 * 1024)
     from device.implements.actuator_impl import ActuatorImpl
-    result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
+    # 资源控制补全(B2)：cpu_affinity 只限定「用哪些核」，但 numpy/torch 底层的 BLAS/OpenMP 默认按
+    # 物理总核数起线程 —— 任务被绑到少数核时，几十个线程在这几个核上空转互抢，矩阵运算不仅不加速反而
+    # 暴慢(实测绑 1 核但仍起 32 线程 -> 比真单线程慢上百倍且非单调)。这里把 BLAS/OMP 线程数对齐到本任务
+    # 实际分到的核数，让「分多少核」真正换来「算多快」——B2 算力档位对多线程数值计算才真正生效。
+    # (threadpoolctl 不可用则退回仅绑核的旧行为，不影响功能。)
+    n_cores = len(core_ids) if core_ids else 0
+    if n_cores > 0:
+        try:
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(limits=n_cores):
+                result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
+        except ImportError:
+            result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
+    else:
+        result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
     # 内存画像：peak_mem_mb = 进程当前 RSS(给人看)；task_mem_mb = 本任务相对开跑前的【提交内存边际增长】
     # (与上限同单位；B4 历史按它定档：自动给档 = 边际×系数 + 地板，作为加到实时提交之上的预算 -> 安全)。
     rss1, vms1 = _mem_mb()
