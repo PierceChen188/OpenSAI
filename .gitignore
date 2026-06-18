@@ -164,3 +164,16 @@ dev_cert.pem
 dev_key.pem
 # data-plane runtime artifacts (transferred blobs)
 .artifacts/
+
+# ===== OpenSAI: research / survey material (not source; contains copyrighted PDFs) =====
+paper-survey/
+# LaTeX build intermediates under docs/ (keep .md/.pdf if you want them in the repo)
+docs/*.aux
+docs/*.toc
+docs/*.out
+docs/_preview*.png
+
+# ===== kept LOCAL-only (intentionally not pushed; remain on local disk) =====
+docs/_header.tex
+docs/ROADMAP.md
+docs/FRONTEND_REQUIREMENTS.md
