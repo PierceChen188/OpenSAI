@@ -177,3 +177,4 @@ docs/_preview*.png
 docs/_header.tex
 docs/ROADMAP.md
 docs/FRONTEND_REQUIREMENTS.md
+docs/ARCHITECTURE_internal.md
