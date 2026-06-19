@@ -281,6 +281,8 @@ class DeviceClient:
                     out_bytes = os.path.getsize(artifact_out)   # 上报产出大小，供 server 自适应放置(T3.2)
                 except OSError:
                     out_bytes = 0
+            if out_bytes:
+                metrics['task_storage_mb'] = round(out_bytes / (1024 * 1024), 2)   # 产出存储 -> 历史画像(自动定档)
 
             _res_str = str(result_1)
             if _res_str.startswith('ERROR') or _res_str.startswith('MISSING'):
@@ -474,6 +476,13 @@ class DeviceClient:
             device_info['cores_total'] = os.cpu_count() or 1
             device_info['cores_committed'] = cls.core_alloc.committed() if cls.core_alloc else 0
             device_info['mem_committed_mb'] = cls.committed_mem_mb
+            try:                                                     # 存储维度：上报产物目录所在盘 总量/空闲(MB)
+                import shutil
+                _du = shutil.disk_usage(ARTIFACTS_DIR)
+                device_info['storage_total_mb'] = round(_du.total / (1024 * 1024))
+                device_info['storage_free_mb'] = round(_du.free / (1024 * 1024))
+            except Exception as e:
+                logging.debug(f"[storage] 采集磁盘用量失败: {e}")
             device_info['delay'] = round(cls.last_rtt_ms, 2)          # 服务器↔设备 RTT(ms)
             with cls.links_lock:
                 device_info['observed_links'] = dict(cls.observed_links)  # 被动链路遥测

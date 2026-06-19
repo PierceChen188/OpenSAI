@@ -53,6 +53,11 @@ class UserServer:
     # 分配一条传输即在源设备上扣减预算、完成时归还 -> "可用 = 预算 - 已承诺"（补 T1.1 的带宽侧）。
     committed_bw = {}
     bw_reservations = {}   # (task_id, consumer_node_id) -> [(src_device_no, rate_mbps), ...] 供完成时归还
+    # 资源档位(存储维度)：committed_storage_mb[device_no] = 该设备当前已承诺的产物存储(MB)；
+    # 派发任务时在【执行设备】上扣减、完成/超时时归还 -> "可用 = 设备空闲磁盘 - 已承诺"，避免把多个大产出
+    # 任务堆到磁盘将满的设备(防超卖)。硬实施由设备侧 7b GC 水位兜底；本维度做"档位决策 + 容量收口 + 记账"。
+    committed_storage_mb = {}
+    storage_reservations = {}   # (task_id, node_id) -> (device_no, storage_mb) 供完成时归还
     # C1 预留泄漏兜底：(task_id, node_id) -> (device_no, 放置时间戳)。完成时移除；超时(任务似已死)由
     # 卸载线程定期回收其放置预留 + 带宽预留，防止设备崩溃后账本永久虚高。
     inflight = {}
@@ -131,6 +136,10 @@ class UserServer:
                 cls.reservations[dev] = max(0, cls.reservations[dev] - 1)
             for s, rt in cls.bw_reservations.pop(key, []):
                 cls.committed_bw[s] = max(0.0, cls.committed_bw.get(s, 0.0) - rt)
+            _sres = cls.storage_reservations.pop(key, None)
+            if _sres:
+                _sd, _smb = _sres
+                cls.committed_storage_mb[_sd] = max(0.0, cls.committed_storage_mb.get(_sd, 0.0) - _smb)
             cls.inflight.pop(key, None)
             logging.warning(f"[reclaim] 子任务 {key} 超过 {ttl}s 未完成，回收其设备 {dev} 的预留")
 
@@ -153,9 +162,12 @@ class UserServer:
                 'mem_committed_mb': d.get('mem_committed_mb', 0), 'delay': d.get('delay', 0),
                 'data_port': d.get('data_port'), 'ip_address': d.get('ip_address'),
                 'observed_links': d.get('observed_links') or {},
+                'storage_total_mb': int(d.get('storage_total_mb') or 0),               # 设备磁盘(心跳)
+                'storage_free_mb': int(d.get('storage_free_mb') or 0),
                 # —— 大脑账本(只在 server 内存、Redis 心跳里没有) ——
                 'placement_reserved': int(cls.reservations.get(dno, 0)),               # T2.1 放置预留
                 'bw_committed_mbps': round(float(cls.committed_bw.get(dno, 0.0)), 2),   # T3.2-A 已承诺出口带宽
+                'storage_committed_mb': round(float(cls.committed_storage_mb.get(dno, 0.0)), 0),  # 已承诺存储档位
             }
         return {
             'devices': view_devs,
@@ -250,8 +262,27 @@ class UserServer:
             idle_mb = float(dev_dict.get('idle_memory') or 0) * 1024
             if budget and idle_mb > 0:
                 budget = min(float(budget), idle_mb * 0.9)
+        # 存储档位：① 节点声明 `storage_mb`；② 否则开 OPENSAI_AUTO_STORAGE 且有历史 -> 历史产出×2、地板256MB。
+        #   按【所选设备空闲磁盘 - 已承诺】收口，并在该设备上记账(完成/超时归还)。
+        storage_budget = param.get('storage_mb')
+        hist_storage = hist.get('task_storage_mb')
+        if storage_budget is None and os.environ.get('OPENSAI_AUTO_STORAGE') and hist_storage:
+            storage_budget = max(float(hist_storage) * 2.0, 256.0)
+        dno_s = dev_dict.get('device_no') if dev_dict else None
+        if dev_dict and storage_budget:
+            free_mb = float(dev_dict.get('storage_free_mb') or 0)
+            if free_mb > 0:
+                avail = max(0.0, free_mb - cls.committed_storage_mb.get(dno_s, 0.0))
+                storage_budget = min(float(storage_budget), avail * 0.9)
+        if storage_budget and storage_budget > 0 and dno_s:
+            cls.committed_storage_mb[dno_s] = cls.committed_storage_mb.get(dno_s, 0.0) + storage_budget
+            cls.storage_reservations[(sub_task_info.get_task_id(), sub_task_info.get_sub_task_id())] = \
+                (dno_s, storage_budget)
+            logging.info(f"[alloc] 存储: 设备 {dno_s} 分配 {storage_budget:.0f} MB "
+                         f"(已承诺 {cls.committed_storage_mb[dno_s]:.0f} MB)")
         return {'cores': cores, 'mem_budget_mb': (int(budget) if budget else None),
-                'est_mem_mb': est_mem_mb}
+                'est_mem_mb': est_mem_mb,
+                'storage_budget_mb': (int(storage_budget) if storage_budget else None)}
 
     @classmethod
     def _update_algo_history(cls, algo, metrics):
@@ -259,9 +290,9 @@ class UserServer:
         if not algo or not isinstance(metrics, dict):
             return
         h = cls.algo_history.setdefault(algo, {'peak_mem_mb': 0.0, 'task_mem_mb': 0.0,
-                                               'proc_secs': 0.0, 'n': 0})
+                                               'proc_secs': 0.0, 'task_storage_mb': 0.0, 'n': 0})
         a = 0.5
-        for k in ('peak_mem_mb', 'task_mem_mb', 'proc_secs'):   # B4 增记 task_mem_mb(边际)
+        for k in ('peak_mem_mb', 'task_mem_mb', 'proc_secs', 'task_storage_mb'):   # 增记产出存储(供自动定档)
             v = metrics.get(k)
             if v:
                 h[k] = float(v) if h['n'] == 0 else a * float(v) + (1 - a) * h[k]
@@ -842,6 +873,11 @@ class UserServer:
                                     # T3.2-A 归还该子任务此前占用的源设备出口带宽。
                                     for _s, _rt in cls.bw_reservations.pop((task_id, subtask_id), []):
                                         cls.committed_bw[_s] = max(0.0, cls.committed_bw.get(_s, 0.0) - _rt)
+                                    # 归还该子任务此前在执行设备上占用的存储档位。
+                                    _sres = cls.storage_reservations.pop((task_id, subtask_id), None)
+                                    if _sres:
+                                        _sd, _smb = _sres
+                                        cls.committed_storage_mb[_sd] = max(0.0, cls.committed_storage_mb.get(_sd, 0.0) - _smb)
                                     cls.inflight.pop((task_id, subtask_id), None)   # C1 在飞登记移除
                                     # B1 历史画像：用设备上报的 metrics 更新该算法的峰值内存/耗时。
                                     cls._update_algo_history(fin_subtask.get_task_algorithm(),
