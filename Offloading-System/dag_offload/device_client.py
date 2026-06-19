@@ -7,7 +7,6 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 将上一级目录添加到Python的模块搜索路径
 # 添加容器管理接口导入
-from device.interfaces.resource_control_interface import ResourceControlInterface
 from config.logging_config import LOG_FORMAT
 from config.network_config import HOST, PORT
 from device.device_monitor import DeviceMonitor, get_gl_device_no
@@ -55,8 +54,6 @@ class CoreAllocator:
 
 
 class DeviceClient:
-    # 添加容器管理器实例（支持容器化任务执行和复用）
-    container_controller = ResourceControlInterface()
     logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
     # 数据面：本机产物服务器（在 activate_client 中启动）
     artifact_server = None
@@ -114,51 +111,14 @@ class DeviceClient:
     #     result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
     #     return result
     def execute_task(cls, algorithm_name, param_dict, data_dict):
+        """进程池不可用 / 损坏时的回退：在主进程内直接执行算法（无每任务核·内存限额）。
+        历史上此处曾尝试 Docker 容器执行，但容器后端零采用且无 Docker 时每个任务都会降级到本地，
+        故已移除容器路径（见 git 历史），直接走本地执行——行为等价、少一层无效绕路。"""
         try:
-            # 从 algorithm_name 中提取纯算法名
-            if '.' in algorithm_name:
-                pure_algorithm_name = algorithm_name.split('.')[-1]
-            else:
-                pure_algorithm_name = algorithm_name
-
-            # 从 param_dict 读取容器资源配置（来自 DAG 图）
-            container_config = param_dict.get('containerConfig', {})
-            cpu_cores = container_config.get('cpu_cores', 2.0)  # 默认2核
-            memory_mb = container_config.get('memory_mb', 2048)  # 默认2GB
-
-            logging.info(f"使用容器执行任务: {pure_algorithm_name}, CPU={cpu_cores}核, 内存={memory_mb}MB")
-            
-            # 创建新容器执行任务（等待结果）
-            result_dict = cls.container_controller.start_task(
-                task_name=pure_algorithm_name,
-                cpu_cores=cpu_cores,
-                memory_mb=memory_mb,
-                param_dict=param_dict,  
-                data_dict=data_dict      
-            )
-            
-            # 提取执行结果
-            if result_dict.get('result', {}).get('status') == 1:
-                # 任务执行成功
-                task_result = result_dict['result'].get('taskResultInfo', '任务执行完成')
-                logging.info(f"容器任务执行成功: {task_result}")
-                result = task_result
-            else:
-                # 容器执行失败（如本机无 Docker / 镜像不可用）——按设计降级为本地直接执行。
-                # 注意：start_task 会吞掉自身异常并返回 status!=1，因此这里不能只靠 except 兜底，
-                # 必须在 status!=1 时显式降级，否则无 Docker 时每个任务都会返回失败串。
-                error_msg = result_dict.get('result', {}).get('taskResultInfo', '任务执行失败')
-                logging.warning(f"容器任务执行失败({error_msg})，降级使用本地直接执行")
-                result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
-
-            return result
-            
+            return ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
         except Exception as e:
-            # 容器执行异常，降级使用本地直接执行
-            logging.error(f"容器执行任务异常: {e}")
-            logging.warning("降级使用本地直接执行方式")
-            result = ActuatorImpl.run_actuator(algorithm_name, param_dict, data_dict)
-            return result
+            logging.error(f"[exec] 本地执行任务异常: {type(e).__name__}: {e}")
+            return f"ERROR: {type(e).__name__}: {e}"
 
     @classmethod
     def process_task(cls, sock, data_decode):

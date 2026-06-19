@@ -41,6 +41,6 @@ aioquic==1.3.0
 # Heavy ML deps (torch/torchvision/tqdm) for the CNN/Train algorithms are also
 # OPTIONAL and live in requirements-ml.txt — install only if you need them.
 #
-# Docker is NOT a pip dependency: ResourceControlInterface shells out to the
-# `docker` CLI. Install Docker separately only if you want container execution;
-# without it, device_client falls back to local execution (see the fallback fix).
+# Task execution backend: process pool (task_pool.py) with per-task core pinning
+# and memory limits. The old Docker container backend was removed (zero adoption;
+# it always degraded to local execution); pool-unavailable fallback = local exec.
