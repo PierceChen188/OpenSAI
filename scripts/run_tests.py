@@ -31,28 +31,37 @@ def submit_dag(dagdata, timeout=45):
 
     def reader():
         s.settimeout(timeout)
+        buf = bytearray()
         try:
             while not done.is_set():
-                data = s.recv(65535)
-                if not data:
+                chunk = s.recv(65536)
+                if not chunk:
                     break
-                try:
-                    obj = json.loads(data.decode('utf-8', 'replace'))
-                except Exception:
-                    continue
-                if 'dagResult' in obj:
-                    holder['r'] = obj['dagResult']
-                    done.set()
-                    break
+                buf.extend(chunk)
+                while True:
+                    nl = buf.find(b'\n')
+                    if nl < 0:
+                        break
+                    line = bytes(buf[:nl]); del buf[:nl + 1]
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line.decode('utf-8', 'replace'))
+                    except Exception:
+                        continue
+                    if 'dagResult' in obj:
+                        holder['r'] = obj['dagResult']
+                        done.set()
+                        return
         except socket.timeout:
             pass
         finally:
             done.set()
 
     threading.Thread(target=reader, daemon=True).start()
-    s.send(json.dumps({'user_beat': {'name': 'suite'}}).encode('utf-8'))
-    time.sleep(0.6)  # avoid TCP coalescing of user_beat + dagData
-    s.send(json.dumps(dagdata).encode('utf-8'))
+    # NDJSON 分帧：每条消息一行 + '\n'，无需 sleep 防粘包
+    s.sendall((json.dumps({'user_beat': {'name': 'suite'}}) + '\n').encode('utf-8'))
+    s.sendall((json.dumps(dagdata) + '\n').encode('utf-8'))
     done.wait(timeout)
     time.sleep(0.2)
     try:

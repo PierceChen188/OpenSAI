@@ -502,9 +502,8 @@ class UserServer:
 
                             # 通过设备的TCP连接发送
                             try:
-                                cls.client_sockets[device_no].send(json.dumps(p2p_msg).encode('utf-8'))
+                                NetworkUtils.send_msg(cls.client_sockets[device_no], p2p_msg)
                                 logging.info(f"通过TCP发送任务到设备: {device_no}")
-                                time.sleep(0.2) # 防止TCP粘包
                             except Exception as e:
                                 logging.error(f"发送任务到设备失败: {e}")
                         else:
@@ -538,9 +537,8 @@ class UserServer:
 
                             # 通过设备的TCP连接发送
                             try:
-                                cls.client_sockets[device_no].send(json.dumps(p2p_msg).encode('utf-8'))
+                                NetworkUtils.send_msg(cls.client_sockets[device_no], p2p_msg)
                                 logging.info(f"通过TCP发送任务到设备: {device_no}")
-                                time.sleep(0.2) # 防止TCP粘包
                             except Exception as e:
                                 logging.error(f"发送任务到设备失败: {e}")
                         else:
@@ -586,7 +584,7 @@ class UserServer:
         for username, addr in user_dict.items():
             if username in cls.client_sockets:
                 try:
-                    cls.client_sockets[username].send(json.dumps(base_info).encode('utf-8'))
+                    NetworkUtils.send_msg(cls.client_sockets[username], base_info)
                 except Exception as e:
                     logging.error(f"Error sending to {username}: {e}")
 
@@ -632,15 +630,15 @@ class UserServer:
         is_device = False  # 该连接是否为边缘设备（用于断开时从Redis在线列表中移除）
 
         try:
+            buf = bytearray()
             while True:
-                data = client_sock.recv(65535)
-                if not data:
+                data_decode = NetworkUtils.recv_msg(client_sock, buf)
+                if data_decode is None:
                     logging.info(f"客户端断开连接: {client_addr}")
                     break
 
-                # 处理接收到的数据
-                if NetworkUtils.is_json(data.decode('utf-8')):
-                    data_decode = json.loads(data.decode('utf-8'))
+                # 处理接收到的数据（NDJSON 分帧：recv_msg 已返回解析后的对象）
+                if data_decode is not None:
                     if NetworkUtils.is_dict(data_decode):
                         # 处理心跳消息(设备)
                         if 'heart_beat' in data_decode:
@@ -668,9 +666,9 @@ class UserServer:
                                                       'data_port': _info.get('data_port')})
                             except Exception:
                                 pass
-                            client_sock.send(json.dumps(
+                            NetworkUtils.send_msg(client_sock,
                                 {"SERVER RESPONSE IP": HOST, "SERVER RESPONSE PORT": PORT,
-                                 "peers": peers}).encode('utf-8'))
+                                 "peers": peers})
 
                         # 处理用户消息
                         elif 'user_beat' in data_decode:
@@ -722,7 +720,7 @@ class UserServer:
 
                             cls.update_ready_task(task_queue)
                             rsp_dict = {"dagRspStatus": True}
-                            client_sock.send(json.dumps(rsp_dict).encode('utf-8'))
+                            NetworkUtils.send_msg(client_sock, rsp_dict)
 
                         # 处理子任务响应
                         elif 'dag_subtask_rsp' in data_decode:
@@ -761,7 +759,7 @@ class UserServer:
                                         # 发送给对应的用户客户端
                                         for username, addr in user_dict.items():
                                             if task_dict[task_id] == addr and username in cls.client_sockets:
-                                                cls.client_sockets[username].send(json.dumps(result_dict).encode('utf-8'))
+                                                NetworkUtils.send_msg(cls.client_sockets[username], result_dict)
                                                 break
 
                                     elif fin_subtask.get_sub_task_status() == SubTaskStatus.DROPPED.value:
@@ -771,7 +769,7 @@ class UserServer:
                                         # 发送给对应的用户客户端
                                         for username, addr in user_dict.items():
                                             if task_dict[task_id] == addr and username in cls.client_sockets:
-                                                cls.client_sockets[username].send(json.dumps(result_dict).encode('utf-8'))
+                                                NetworkUtils.send_msg(cls.client_sockets[username], result_dict)
                                                 break
 
                                     else:
@@ -799,7 +797,7 @@ class UserServer:
                                             # 发送给对应的用户客户端
                                             for username, addr in user_dict.items():
                                                 if task_dict[task_id] == addr and username in cls.client_sockets:
-                                                    cls.client_sockets[username].send(json.dumps(result_dict).encode('utf-8'))
+                                                    NetworkUtils.send_msg(cls.client_sockets[username], result_dict)
                                                     break
 
                                         cls.update_ready_task(cls.all_task_dict[task_id]["queue"])
@@ -827,7 +825,7 @@ class UserServer:
                             # 发送给对应的用户客户端
                             for username, addr in user_dict.items():
                                 if task_dict[task_id] == addr and username in cls.client_sockets:
-                                    cls.client_sockets[username].send(json.dumps(result_dict).encode('utf-8'))
+                                    NetworkUtils.send_msg(cls.client_sockets[username], result_dict)
                                     break
 
                         # 处理设备/算法/策略信息请求
@@ -844,7 +842,7 @@ class UserServer:
                             # 查找设备连接
                             if to_device_no in cls.client_sockets:
                                 try:
-                                    cls.client_sockets[to_device_no].send(data)  # 原样转发数据
+                                    NetworkUtils.send_msg(cls.client_sockets[to_device_no], data_decode)  # 原样转发（分帧）
                                     logging.info(f"转发消息到设备 {to_device_no}")
                                 except Exception as e:
                                     logging.error(f"转发消息失败: {e}")
@@ -863,7 +861,7 @@ class UserServer:
                                 to_device_no = p2p_msg_dict.get('to_device_no')
                                 if to_device_no and to_device_no in cls.client_sockets:
                                     try:
-                                        cls.client_sockets[to_device_no].send(json.dumps(p2p_msg_dict).encode('utf-8'))
+                                        NetworkUtils.send_msg(cls.client_sockets[to_device_no], p2p_msg_dict)
                                         logging.info(f"广播消息到设备 {to_device_no}")
                                     except Exception as e:
                                         logging.error(f"广播消息失败: {e}")

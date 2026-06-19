@@ -259,7 +259,7 @@ class DeviceClient:
             try:
                 # 再次检查 socket 是否有效
                 if sock.fileno() != -1:
-                    sock.send(json.dumps(rsp_dict).encode('utf-8'))
+                    NetworkUtils.send_msg(sock, rsp_dict)
                     logging.info(f"Sent task result back to server: {rsp_dict}")
             except (socket.error, OSError) as e:
                 logging.warning(f"Socket error during task response sending: {e}")
@@ -327,24 +327,26 @@ class DeviceClient:
         # 发送设备初始化消息，格式化为JSON以便服务器识别
         init_msg = {'heart_beat': True, 'device_name': name, 'device_no': get_gl_device_no(),
                     'data_port': DATA_PORT}
-        sock.send(json.dumps(init_msg).encode('utf-8'))  # TCP: sendto -> send
+        NetworkUtils.send_msg(sock, init_msg)
         logging.info(f"Sent device initialization message to {addr}")
 
+        buf = bytearray()
         while True:
             try:
-                data = sock.recv(65535)  # TCP: recvfrom -> recv
-                if not data:  # 如果没有接收到数据，说明连接可能已断开
-                    logging.warning("Connection closed by server")
-                    break
-                logging.info(data.decode('utf-8'))
+                data_decode = NetworkUtils.recv_msg(sock, buf)  # NDJSON 分帧读取一条消息
             except (socket.error, OSError) as e:
                 # 捕获 socket 相关异常，如 socket 被关闭等
                 logging.warning(f"[EXIT] The receive_msg thread is over, Socket error occurred: {e}")
                 break
+            except ValueError as e:
+                logging.warning(f"跳过无法解析的控制帧: {e}")
+                continue
+            if data_decode is None:  # 连接已断开
+                logging.warning("Connection closed by server")
+                break
 
             # ---------------处理对应的dag任务-------------
-            if NetworkUtils.is_json(data.decode('utf-8')):
-                data_decode = json.loads(data.decode('utf-8'))
+            if data_decode is not None:
                 if NetworkUtils.is_dict(data_decode) and 'udp_p2p_msg' in data_decode:
                     logging.info(f"Received P2P message: {data_decode}")
                     AlgorithmList = ActuatorImpl.read_algorithms()
@@ -413,7 +415,7 @@ class DeviceClient:
             message = json.dumps(device_info)
             try:
                 cls.last_hb_sent = time.time()
-                sock.send(message.encode('utf-8'))  # TCP: sendto -> send
+                NetworkUtils.send_msg(sock, device_info)
                 logging.info(f"Sent heartbeat to server: {message}")
             except (socket.error, OSError) as e:
                 # 捕获 socket 相关异常，如 socket 被关闭等

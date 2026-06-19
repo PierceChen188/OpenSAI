@@ -78,28 +78,37 @@ def submit_named(user_name, dag, timeout, out, start_evt):
 
     def reader():
         s.settimeout(timeout)
+        buf = bytearray()
         try:
             while not done.is_set():
-                data = s.recv(65535)
-                if not data:
+                chunk = s.recv(65536)
+                if not chunk:
                     break
-                try:
-                    obj = json.loads(data.decode('utf-8', 'replace'))
-                except Exception:
-                    continue
-                if 'dagResult' in obj:
-                    holder['r'] = obj['dagResult']; done.set(); break
+                buf.extend(chunk)
+                while True:
+                    nl = buf.find(b'\n')
+                    if nl < 0:
+                        break
+                    line = bytes(buf[:nl]); del buf[:nl + 1]
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line.decode('utf-8', 'replace'))
+                    except Exception:
+                        continue
+                    if 'dagResult' in obj:
+                        holder['r'] = obj['dagResult']; done.set(); return
         except (socket.timeout, OSError):     # OSError: socket closed by main thread on done
             pass
         finally:
             done.set()
 
     threading.Thread(target=reader, daemon=True).start()
-    s.send(json.dumps({'user_beat': {'name': user_name}}).encode('utf-8'))
+    s.sendall((json.dumps({'user_beat': {'name': user_name}}) + '\n').encode('utf-8'))
     time.sleep(0.5)
     start_evt.wait()                       # release all submitters together (true concurrency)
     t0 = time.time()
-    s.send(json.dumps(dag).encode('utf-8'))
+    s.sendall((json.dumps(dag) + '\n').encode('utf-8'))
     done.wait(timeout)
     out[user_name] = (holder.get('r'), time.time() - t0)
     try:

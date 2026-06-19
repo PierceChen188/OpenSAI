@@ -47,20 +47,30 @@ except Exception as e:
 
 def reader():
     sock.settimeout(60)
+    buf = bytearray()
     try:
         while not done.is_set():
-            data = sock.recv(65535)
-            if not data:
+            chunk = sock.recv(65536)
+            if not chunk:
                 break
-            try:
-                obj = json.loads(data.decode('utf-8', 'replace'))
-            except Exception:
-                continue
-            if 'dagRspStatus' in obj:
-                print('[reader] server ACK dagRspStatus =', obj['dagRspStatus'])
-            elif 'dagResult' in obj:
-                holder['r'] = obj['dagResult']
-                done.set()
+            buf.extend(chunk)
+            while True:
+                nl = buf.find(b'\n')
+                if nl < 0:
+                    break
+                line = bytes(buf[:nl]); del buf[:nl + 1]
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line.decode('utf-8', 'replace'))
+                except Exception:
+                    continue
+                if 'dagRspStatus' in obj:
+                    print('[reader] server ACK dagRspStatus =', obj['dagRspStatus'])
+                elif 'dagResult' in obj:
+                    holder['r'] = obj['dagResult']
+                    done.set()
+            if done.is_set():
                 break
     except socket.timeout:
         print('[reader] TIMEOUT 等待 dagResult')
@@ -69,9 +79,8 @@ def reader():
 
 
 threading.Thread(target=reader, daemon=True).start()
-sock.send(json.dumps({'user_beat': {'name': 'blobtester'}}).encode('utf-8'))
-time.sleep(0.6)
-sock.send(json.dumps(dag).encode('utf-8'))
+sock.sendall((json.dumps({'user_beat': {'name': 'blobtester'}}) + '\n').encode('utf-8'))
+sock.sendall((json.dumps(dag) + '\n').encode('utf-8'))
 print(f"[inject] 提交 Producer->Consumer DAG (size={SIZE_MB}MB), 等待结果...")
 done.wait(timeout=60)
 time.sleep(0.3)

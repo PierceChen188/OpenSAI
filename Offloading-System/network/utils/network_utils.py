@@ -1,4 +1,6 @@
 import json
+import threading
+import weakref
 from typing import TypeVar
 
 
@@ -161,3 +163,50 @@ class NetworkUtils:
         :return: True或者False
         """
         return isinstance(var, float)
+
+    # ===== NDJSON 分帧消息收发(替代裸 recv(65535)+is_json,消除 TCP 粘包/分段丢消息) =====
+    # 每条控制面消息 = 一行 JSON + '\n';json.dumps 默认不产生换行,故换行可作可靠帧边界。
+    _send_locks = weakref.WeakKeyDictionary()
+    _send_locks_guard = threading.Lock()
+
+    @classmethod
+    def _send_lock(cls, sock):
+        # 同一 socket 可能被多个线程并发写(如派发线程 + 该连接的处理线程),
+        # 用每 socket 一把锁保证一帧 sendall 原子、不与其它帧交错。
+        with cls._send_locks_guard:
+            lk = cls._send_locks.get(sock)
+            if lk is None:
+                lk = threading.Lock()
+                cls._send_locks[sock] = lk
+            return lk
+
+    @classmethod
+    def send_msg(cls, sock, obj) -> None:
+        """把一个对象作为一帧 NDJSON 发出(每 socket 原子)。obj 为 dict/可 json 序列化对象。"""
+        line = (json.dumps(obj) + '\n').encode('utf-8')
+        with cls._send_lock(sock):
+            sock.sendall(line)
+
+    @classmethod
+    def send_line(cls, sock, text: str) -> None:
+        """把**已序列化**的 JSON 字符串作为一帧发出(每 socket 原子)。"""
+        line = (text.rstrip('\n') + '\n').encode('utf-8')
+        with cls._send_lock(sock):
+            sock.sendall(line)
+
+    @classmethod
+    def recv_msg(cls, sock, buf: bytearray):
+        """用调用方持有的 bytearray 缓冲,从 sock 读出**恰好一条** NDJSON 消息并返回解析后的对象;
+        连接关闭/EOF 返回 None。空行跳过。粘包/分段都由缓冲正确处理。"""
+        while True:
+            nl = buf.find(b'\n')
+            if nl >= 0:
+                line = bytes(buf[:nl])
+                del buf[:nl + 1]
+                if not line.strip():
+                    continue
+                return json.loads(line.decode('utf-8'))
+            chunk = sock.recv(65536)
+            if not chunk:
+                return None
+            buf.extend(chunk)

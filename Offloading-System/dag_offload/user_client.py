@@ -45,25 +45,26 @@ def msg_broker(sock, addr):
     '''
     # 在接收消息前先发送一条消息以便让系统知道所占端口（仅针对特定系统需求，可根据实际情况调整）
     user = {"user_beat": {"name": "user1"}}
-    sock.send(json.dumps(user).encode('utf-8'))
+    NetworkUtils.send_msg(sock, user)
     logging.info(f"Start receiving messages from {addr}")
 
+    buf = bytearray()
     while True:
         try:
-            data = sock.recv(65535)  # 接收数据
-            if not data:
-                logging.warning("Connection closed by server")
-                break
-            # Reduce log noise
-            # logging.info(data.decode('utf-8')) 
+            data_decode = NetworkUtils.recv_msg(sock, buf)  # NDJSON 分帧读取一条消息
         except (socket.error, OSError) as e:
-        # 捕获 socket 相关异常，如 socket 被关闭等
+            # 捕获 socket 相关异常，如 socket 被关闭等
             logging.warning(f"[EXIT] The receive_msg thread is over, Socket error occurred: {e}")
+            break
+        except ValueError as e:
+            logging.warning(f"跳过无法解析的控制帧: {e}")
+            continue
+        if data_decode is None:
+            logging.warning("Connection closed by server")
             break
 
         # ---------------处理对应的dag任务，将result回传给前端-------------
-        if NetworkUtils.is_json(data.decode('utf-8')):
-            data_decode = json.loads(data.decode('utf-8'))
+        if data_decode is not None:
             if NetworkUtils.is_dict(data_decode):
                 if 'devicesInfo' in data_decode:
                     # logging.info(f"[BASE] base devices info is collected!")
@@ -129,7 +130,7 @@ def status_stream():
     addr = (HOST, PORT)
     data = {}
     data_encoded = json.dumps(data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
     # print("/api/status", data)
     return Response(generate(results_queue), mimetype='text/event-stream')
 
@@ -152,7 +153,7 @@ def update_stream():
     global sock
     addr = (HOST, PORT)
     data_encoded = json.dumps(data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
     # print("/api/update", data)
     return Response(generate(feedback_queue), mimetype='text/event-stream')
 
@@ -167,7 +168,7 @@ def policies_stream():
     global sock
     addr = (HOST, PORT)
     data_encoded = json.dumps(data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
     # print("/api/dag/policies", data)
     return Response(generate(policy_queue), mimetype='text/event-stream')
 
@@ -182,7 +183,7 @@ def algorithms_stream():
     addr = (HOST, PORT)
     data_encoded = json.dumps(data)
     # print("/api/dag/algorithms", data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
 
     return Response(generate(algorithm_queue), mimetype='text/event-stream')
 
@@ -199,7 +200,7 @@ def devices_stream():
     addr = (HOST, PORT)
     data_encoded = json.dumps(data)
     # print("/api/devices", data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
 
     return Response(generate(devices_queue), mimetype='text/event-stream')
 
@@ -220,7 +221,7 @@ def dag_receive_data():
     # data = {}
     data_encoded = json.dumps(data)
     # print("/api/dag/upload", data)
-    sock.send(data_encoded.encode('utf-8'))
+    NetworkUtils.send_line(sock, data_encoded)
 
     return Response(generate(results_queue), mimetype='text/event-stream')
 

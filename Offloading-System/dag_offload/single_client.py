@@ -43,24 +43,26 @@ def msg_broker(sock, addr):
     '''
     # 在接收消息前先发送一条消息以便让系统知道所占端口（仅针对特定系统需求，可根据实际情况调整）
     user = {"user_beat": {"name": "user1"}}
-    sock.send(json.dumps(user).encode('utf-8'))  # TCP: sendto -> send
+    NetworkUtils.send_msg(sock, user)
     logging.info(f"Start receiving messages from {addr}")
 
+    buf = bytearray()
     while True:
         try:
-            data = sock.recv(65535)  # TCP: recvfrom -> recv
-            if not data:  # TCP连接关闭检查
-                logging.warning("Connection closed by server")
-                break
-            logging.info(data.decode('utf-8'))
+            data_decode = NetworkUtils.recv_msg(sock, buf)  # NDJSON 分帧读取一条消息
         except (socket.error, OSError) as e:
             # 捕获 socket 相关异常，如 socket 被关闭等
             logging.warning(f"[EXIT] The receive_msg thread is over, Socket error occurred: {e}")
             break
+        except ValueError as e:
+            logging.warning(f"跳过无法解析的控制帧: {e}")
+            continue
+        if data_decode is None:
+            logging.warning("Connection closed by server")
+            break
 
         # ---------------处理对应的dag任务，将result回传给前端-------------
-        if NetworkUtils.is_json(data.decode('utf-8')):
-            data_decode = json.loads(data.decode('utf-8'))
+        if data_decode is not None:
             if NetworkUtils.is_dict(data_decode):
                 if 'devicesInfo' in data_decode:
                     logging.info(f"[BASE] base devices info is collected!")
@@ -208,7 +210,7 @@ if __name__ == '__main__':
     #                      ]
     #                  }}
     data_encoded = json.dumps(dag_data)
-    sock.send(data_encoded.encode('utf-8'))  # TCP: sendto -> send
+    NetworkUtils.send_line(sock, data_encoded)
     # 根据任务执行时间适当调整
     time.sleep(128)
     # app.run(debug=True)
