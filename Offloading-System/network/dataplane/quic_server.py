@@ -103,30 +103,45 @@ class ArtifactServerProtocol(QuicConnectionProtocol):
             buf.extend(event.data)
             if event.end_stream:
                 raw = bytes(self._reqbuf.pop(sid, bytearray())).decode('utf-8', 'replace').strip()
-                artifact_id, req_rate_bps = raw, 0.0
-                if raw[:1] == '{':                       # 结构化请求（带限速）
+                artifact_id, req_rate_bps, offset, length = raw, 0.0, 0, None
+                if raw[:1] == '{':                       # 结构化请求（带限速/范围）
                     try:
                         obj = json.loads(raw)
                         if isinstance(obj, dict) and 'id' in obj:
                             artifact_id = str(obj['id'])
                             req_rate_bps = float(obj.get('rate_mbps') or 0) * 1024 * 1024
+                            offset = int(obj.get('offset') or 0)
+                            _ln = obj.get('length')
+                            length = int(_ln) if _ln is not None else None
                     except (ValueError, TypeError):
                         pass
-                self._serve(sid, artifact_id, req_rate_bps)
+                self._serve(sid, artifact_id, req_rate_bps, offset, length)
 
-    def _serve(self, stream_id, artifact_id, req_rate_bps=0.0):
+    def _serve(self, stream_id, artifact_id, req_rate_bps=0.0, offset=0, length=None):
         # 在事件循环里起一个任务做（可能限速的）流式回传。
-        asyncio.ensure_future(self._serve_async(stream_id, artifact_id, req_rate_bps))
+        asyncio.ensure_future(self._serve_async(stream_id, artifact_id, req_rate_bps, offset, length))
 
-    async def _serve_async(self, stream_id, artifact_id, req_rate_bps):
+    async def _serve_async(self, stream_id, artifact_id, req_rate_bps, offset=0, length=None):
         path = self._registry.get(artifact_id)
         if not (path and os.path.exists(path)):
             self._quic.send_stream_data(stream_id, _NOT_FOUND.to_bytes(8, 'big'), end_stream=True)
             self.transmit()
             logging.warning(f"[dataplane] 未找到 artifact '{artifact_id}'")
             return
-        with open(path, 'rb') as f:
-            data = f.read()
+        # 范围读：offset/length 缺省即整文件；length<=0 也视为到文件尾（多链路分条带用）。
+        try:
+            fsize = os.path.getsize(path)
+            off = max(0, int(offset or 0))
+            ln = (max(0, fsize - off) if (length is None or int(length) <= 0)
+                  else min(int(length), max(0, fsize - off)))
+            with open(path, 'rb') as f:
+                f.seek(off)
+                data = f.read(ln)
+        except OSError as e:
+            self._quic.send_stream_data(stream_id, _NOT_FOUND.to_bytes(8, 'big'), end_stream=True)
+            self.transmit()
+            logging.warning(f"[dataplane] 读取 artifact '{artifact_id}' 范围[{offset}:{length}]失败: {e}")
+            return
         header = len(data).to_bytes(8, 'big')
         flow_cap = req_rate_bps if (req_rate_bps and req_rate_bps > 0) else None   # 每流上限(大脑下发)
         device_limited = self._share.budget > 0                                   # 设备出口预算(A1平分)

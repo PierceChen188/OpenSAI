@@ -30,14 +30,21 @@ class _BlobClientProtocol(QuicConnectionProtocol):
         self._recv = {}      # stream_id -> 收到的字节
         self._waiters = {}   # stream_id -> Future
 
-    async def fetch(self, artifact_id: str, rate_mbps=None) -> bytes:
+    async def fetch(self, artifact_id: str, rate_mbps=None, offset=None, length=None) -> bytes:
         sid = self._quic.get_next_available_stream_id()
         fut = asyncio.get_running_loop().create_future()
         self._waiters[sid] = fut
         self._recv[sid] = bytearray()
-        # 带限速时发结构化请求（让发送端按 rate_mbps 限速，T5.3）；否则发裸 artifact_id（向后兼容）。
-        if rate_mbps and rate_mbps > 0:
-            req = json.dumps({'id': artifact_id, 'rate_mbps': rate_mbps}).encode('utf-8')
+        # 带限速/范围时发结构化请求；否则发裸 artifact_id（向后兼容）。
+        if (rate_mbps and rate_mbps > 0) or offset or (length is not None):
+            req_obj = {'id': artifact_id}
+            if rate_mbps and rate_mbps > 0:
+                req_obj['rate_mbps'] = rate_mbps
+            if offset:
+                req_obj['offset'] = int(offset)
+            if length is not None:
+                req_obj['length'] = int(length)
+            req = json.dumps(req_obj).encode('utf-8')
         else:
             req = artifact_id.encode('utf-8')
         self._quic.send_stream_data(sid, req, end_stream=True)
@@ -133,13 +140,14 @@ async def _get_conn(host: str, port: int) -> _Conn:
         return conn
 
 
-async def _fetch_pooled(host: str, port: int, artifact_id: str, rate_mbps) -> bytes:
+async def _fetch_pooled(host: str, port: int, artifact_id: str, rate_mbps,
+                        offset=None, length=None) -> bytes:
     key = (host, int(port))
     last_exc = None
     for _attempt in range(2):                # 连接失效 -> 剔除、关闭、重连重试一次
         conn = await _get_conn(host, port)
         try:
-            return await conn.protocol.fetch(artifact_id, rate_mbps)
+            return await conn.protocol.fetch(artifact_id, rate_mbps, offset, length)
         except FileNotFoundError:            # 应用级：对端无此产物，不重试
             raise
         except Exception as e:               # 可能是连接断开 -> 剔除后重连重试
@@ -167,6 +175,16 @@ def fetch_blob(host: str, port: int, artifact_id: str,
         with open(dest_path, 'wb') as f:
             f.write(data)
     return {'bytes': len(data), 'elapsed': elapsed, 'dest': dest_path}
+
+
+def fetch_range(host: str, port: int, artifact_id: str, offset: int, length: int,
+                timeout: float = 120, rate_mbps=None) -> bytes:
+    """拉取 artifact 的 [offset, offset+length) 字节段并返回原始字节（多链路分条带用）。
+    复用按源设备的长连接；并发调用在常驻循环上以多 stream 并行。"""
+    loop = _get_loop()
+    fut = asyncio.run_coroutine_threadsafe(
+        _fetch_pooled(host, int(port), artifact_id, rate_mbps, int(offset), int(length)), loop)
+    return fut.result(timeout)
 
 
 def close_all() -> None:
