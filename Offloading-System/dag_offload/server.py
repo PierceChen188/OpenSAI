@@ -397,6 +397,37 @@ class UserServer:
             time.sleep(0.01)  # 指定间隔检查一次
 
     @classmethod
+    def _pick_relay(cls, consumer_dno, src_dno, src_ip, src_port, size_bytes, device_info_list):
+        """P0-1b 多链路中继选择：仅当 OPENSAI_MULTIPATH 开启、产物够大、且存在某中继 R 使
+        min(src→R, R→consumer) 明显快于直连 consumer→src 时，返回 (relay_ip, relay_port)，否则 None。
+        带宽取自各设备上报的 observed_links（key='ip:dataport'，单位 MB/s），未知用默认兜底。
+        默认关闭 + 阈值保守 → 同构/局域网下不会误触发，不影响现有直连路径与回归。"""
+        if os.environ.get('OPENSAI_MULTIPATH', '0') in ('0', '', 'false', 'False'):
+            return None
+        min_mb = float(os.environ.get('OPENSAI_MULTIPATH_MIN_MB', '8') or 8)
+        if not size_bytes or size_bytes < min_mb * 1024 * 1024:
+            return None
+        gain = float(os.environ.get('OPENSAI_MULTIPATH_GAIN', '1.3') or 1.3)
+        default_bw = float(os.environ.get('OPENSAI_DEFAULT_BW_MBPS', '10') or 10)
+
+        def bw(dev, peer_ip, peer_port):
+            rec = ((dev or {}).get('observed_links') or {}).get(f"{peer_ip}:{int(peer_port)}")
+            return float(rec['mbps']) if (rec and rec.get('mbps')) else default_bw
+
+        consumer_dev = device_info_list.get(consumer_dno) or {}
+        threshold = bw(consumer_dev, src_ip, src_port) * gain   # 绕行须超过直连×gain 才值得
+        best, best_bw = None, threshold
+        for r_dno, r in device_info_list.items():
+            if r_dno in (consumer_dno, src_dno) or not r.get('data_port'):
+                continue
+            r_ip, r_port = r.get('ip_address'), r.get('data_port')
+            path_bw = min(bw(r, src_ip, src_port),            # src→R（用 R 实测从 src 拉的带宽近似）
+                          bw(consumer_dev, r_ip, r_port))     # R→consumer（用 consumer 实测从 R 拉近似）
+            if path_bw > best_bw:
+                best, best_bw = (r_ip, r_port), path_bw
+        return best
+
+    @classmethod
     def _build_input_artifacts(cls, sub_task_info):
         """数据面：为待派发的子任务，构造“需要从前驱设备拉取的产物”清单。
 
@@ -417,6 +448,8 @@ class UserServer:
         if not predecessors:
             return artifacts
         device_info_list = DeviceServiceImpl.read_device_info() or {}
+        _consumer = sub_task_info.get_device_info()
+        consumer_dno = _consumer.get_device_no() if _consumer else None
         for p in predecessors:
             try:
                 pred_subtask = cls.all_task_dict[task_id]["queue"][p - 1]
@@ -427,14 +460,29 @@ class UserServer:
                 if not dev or not dev.get('data_port'):
                     logging.warning(f"前驱节点{p}的设备数据端点未知，暂无法构造产物拉取项")
                     continue
-                artifacts.append({
+                entry = {
                     'artifact_id': f"{task_id}:{p}",
                     'src_ip': dev.get('ip_address'),
                     'src_port': dev.get('data_port'),
                     'pred_id': p,
                     # T3.2-A：按需求(声明/A2自动按数据量) + 源设备带宽预算，分配这条传输的限速(MB/s)；None=不限。
                     'rate_mbps': cls._artifact_rate_mbps(sub_task_info, pred_dev.get_device_no(), pred_node_id=p),
-                })
+                }
+                # P0-1b 多链路：直连带宽不足且存在更快中继时，附 sources(直连+中继)+size 激活分条带聚合。
+                size_bytes = cls.output_sizes.get((task_id, p), 0)
+                relay = cls._pick_relay(consumer_dno, pred_dev.get_device_no(),
+                                        dev.get('ip_address'), dev.get('data_port'),
+                                        size_bytes, device_info_list)
+                if relay:
+                    entry['size'] = size_bytes
+                    entry['sources'] = [
+                        {'host': dev.get('ip_address'), 'port': dev.get('data_port')},
+                        {'host': relay[0], 'port': relay[1],
+                         'origin_ip': dev.get('ip_address'), 'origin_port': dev.get('data_port')},
+                    ]
+                    logging.info(f"[multipath] task={task_id} sub={node_id} 前驱{p} 启用中继 "
+                                 f"{relay[0]}:{relay[1]}（直连+中继分条带, size={size_bytes}）")
+                artifacts.append(entry)
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")
         return artifacts
