@@ -4,6 +4,7 @@
 用法:  .venv/Scripts/python.exe scripts/bench_dataplane.py
 改造前后各跑一次对比（连接复用看 [D]，并发看 [C]）。
 """
+import hashlib
 import os
 import sys
 import tempfile
@@ -19,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'Offloading-System'))
 
-from network.dataplane.quic_client import fetch_blob          # noqa: E402
+from network.dataplane.quic_client import fetch_blob, fetch_striped   # noqa: E402
 from network.dataplane.quic_server import ArtifactServer      # noqa: E402
 
 HOST, PORT = '127.0.0.1', 9557
@@ -32,6 +33,14 @@ def make_blob(d, name, mb):
     with open(p, 'wb') as f:
         f.write(os.urandom(mb * 1024 * 1024))
     return p
+
+
+def sha16(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h.update(b)
+    return h.hexdigest()[:16]
 
 
 def main():
@@ -69,6 +78,34 @@ def main():
         fetch_blob(HOST, PORT, 'small', timeout=120)
     dtD = time.time() - t0
     print(f"[D] 1MB x20 同源重复:  {dtD:.2f}s, 平均 {dtD / 20 * 1000:.0f} ms/次", flush=True)
+
+    # ===== [E]/[F] 中继多链路聚合：每路限速 RATE MB/s，直连 vs 直连+中继(回源 A) =====
+    # 用每路限速模拟“单链路带宽受限”：两条受限路径(直连 + 经中继)应聚合到 ~2x 单路。
+    RATE = 8.0
+    mp_mb = 40
+    mp_path = make_blob(d, 'mp', mp_mb)
+    srv.register('mp', mp_path)
+    relay = ArtifactServer(host=HOST, port=PORT + 1)     # 中继：不注册 'mp'，请求时回源到 A
+    relay.start(wait=True, timeout=10)
+    time.sleep(0.4)
+    n_mp = os.path.getsize(mp_path)
+    orig = sha16(mp_path)
+
+    e_out = os.path.join(d, 'e_out')
+    t0 = time.time()
+    fetch_striped([{'host': HOST, 'port': PORT}], 'mp', e_out, n_mp, rate_mbps=RATE)
+    dtE = time.time() - t0
+    print(f"[E] 仅直连 @{RATE:.0f}MB/s:       {dtE:.2f}s, {mp_mb / dtE:.1f} MB/s   "
+          f"sha {'OK' if sha16(e_out) == orig else 'MISMATCH'}", flush=True)
+
+    f_out = os.path.join(d, 'f_out')
+    sources = [{'host': HOST, 'port': PORT},
+               {'host': HOST, 'port': PORT + 1, 'origin_ip': HOST, 'origin_port': PORT}]
+    t0 = time.time()
+    fetch_striped(sources, 'mp', f_out, n_mp, rate_mbps=RATE)
+    dtF = time.time() - t0
+    print(f"[F] 直连+中继 @{RATE:.0f}MB/s/路:  {dtF:.2f}s, {mp_mb / dtF:.1f} MB/s   "
+          f"(聚合 {dtE / max(dtF, 1e-6):.1f}x)   sha {'OK' if sha16(f_out) == orig else 'MISMATCH'}", flush=True)
 
 
 if __name__ == '__main__':
