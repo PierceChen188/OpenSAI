@@ -34,6 +34,7 @@ feedback_queue = queue.Queue()
 algorithm_queue = queue.Queue()
 devices_queue = queue.Queue()
 policy_queue = queue.Queue()
+events_queue = queue.Queue()   # §14.2 决策事件流（放置/资源/传输）
 
 
 '''
@@ -75,6 +76,8 @@ def msg_broker(sock, addr):
                 elif 'policiesInfo' in data_decode:
                     # logging.info(f"[BASE] base policies info is collected!")
                     policy_queue.put(data_decode)
+                elif 'eventsInfo' in data_decode:
+                    events_queue.put(data_decode)
                 elif 'dagResult' in data_decode:
                     logging.info(f"[FINISH] The dag task is done! Congratulation!")
                     # results_queue.put(data_decode)
@@ -109,14 +112,20 @@ def allowed_file(filename):
 
 @app.route('/')
 def index():
-    # The first-version SPA was removed; a new frontend will be built (see docs/FRONTEND_REQUIREMENTS.md).
-    # The backend API (this bridge) below stays available. Serve a minimal English placeholder.
+    # Serve the built SPA (frontend/ -> `npm run build` emits index.html + assets/
+    # into this static folder). The SPA uses hash routing, so only '/' needs to
+    # resolve here; deep links like '/#monitor' are handled client-side.
+    index_path = os.path.join(app.static_folder, 'index.html')
+    if os.path.exists(index_path):
+        return app.send_static_file('index.html')
+    # Fallback when the bundle hasn't been built yet.
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>OpenSAI</title></head>'
             '<body style="font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:640px;'
             'margin:80px auto;padding:0 20px;color:#222;line-height:1.6">'
             '<h2>OpenSAI</h2>'
-            '<p>The web frontend is being rebuilt. The backend API (this bridge) is running.</p>'
-            '<p>Frontend spec: <code>docs/FRONTEND_REQUIREMENTS.md</code>.</p>'
+            '<p>The web frontend has not been built yet. Run <code>npm install &amp;&amp; npm run build</code> '
+            'in <code>frontend/</code>; the bundle is emitted into this static folder.</p>'
+            '<p>The backend API (this bridge) is running.</p>'
             '</body></html>')
 
 # 处理 GET 请求
@@ -186,6 +195,17 @@ def algorithms_stream():
     NetworkUtils.send_line(sock, data_encoded)
 
     return Response(generate(algorithm_queue), mimetype='text/event-stream')
+
+
+@app.route('/api/events', methods=['GET'])
+def events_stream():
+    # §14.2 决策事件流：向中枢请求放置/资源/传输事件快照，一次性回前端（前端轮询、按 seq 去重）。
+    if request.method == 'OPTIONS':
+        return '', 200
+    data = {"eventsInfo": "data"}
+    global sock
+    NetworkUtils.send_line(sock, json.dumps(data))
+    return Response(generate(events_queue), mimetype='text/event-stream')
 
 
 @app.route('/api/devices', methods=['GET'])

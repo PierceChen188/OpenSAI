@@ -7,6 +7,7 @@ import datetime
 import threading
 import sys
 import os
+from collections import deque
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 将上一级目录添加到Python的模块搜索路径
 from config.logging_config import LOG_FORMAT
@@ -65,6 +66,11 @@ class UserServer:
     # B1 历史画像：algo_name -> {peak_mem_mb, task_mem_mb, proc_secs, n}（设备 rsp 上报 metrics 后 EWMA）。
     # task_mem_mb=扣掉 worker 基线的「任务边际内存」；供 B4 在开 OPENSAI_AUTO_MEM 时自动定内存档(基线+边际×系数)。
     algo_history = {}
+    # 决策事件流(§14.2)：放置/资源/传输三类结构化事件的环形缓冲，供前端轮询展示"决策过程"。
+    # 只在内存里、有界(防膨胀)；读写用 events_lock 保护(快照与追加可能跨线程)。
+    decision_events = deque(maxlen=400)
+    _event_seq = 0
+    events_lock = threading.Lock()
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -147,6 +153,24 @@ class UserServer:
             cls.reservations[dno] = cls.reservations.get(dno, 0) + 1
         # C1 记录在飞任务(设备+时间戳)，供超时回收。
         cls.inflight[(subtask.get_task_id(), subtask.get_sub_task_id())] = (dno, time.time())
+        # §14.2 放置决策事件：候选集合 / 健康预筛淘汰 / 代价打分 / 选中 / 就近命中。
+        try:
+            pred_info = cls._predecessor_info(subtask)
+            scored = (OffloadingImpl.score_candidates(healthy_list, subtask, pred_info, cls.reservations)
+                      if mode in ('plan', 'smart') and subtask.get_sub_task_direct_allocate_id() == -1 else [])
+            filtered = [{'device': d, 'reason': '过载(健康预筛)'}
+                        for d in device_info_list if d not in (healthy_list or {})]
+            cls._emit_event('placement', {
+                'task_id': subtask.get_task_id(), 'node_id': subtask.get_sub_task_id(),
+                'algorithm': subtask.get_task_algorithm(), 'mode': mode,
+                'chosen': dno,
+                'candidates': sorted((healthy_list or {}).keys()),
+                'filtered': filtered,
+                'scores': scored,
+                'locality_hit': any(src == dno for (src, _b) in pred_info),
+            })
+        except Exception as _e:
+            logging.debug(f"[event] placement 忽略: {_e}")
         return True
 
     @classmethod
@@ -306,9 +330,24 @@ class UserServer:
                 (dno_s, storage_budget)
             logging.info(f"[alloc] 存储: 设备 {dno_s} 分配 {storage_budget:.0f} MB "
                          f"(已承诺 {cls.committed_storage_mb[dno_s]:.0f} MB)")
-        return {'cores': cores, 'mem_budget_mb': (int(budget) if budget else None),
-                'est_mem_mb': est_mem_mb,
-                'storage_budget_mb': (int(storage_budget) if storage_budget else None)}
+        _alloc = {'cores': cores, 'mem_budget_mb': (int(budget) if budget else None),
+                  'est_mem_mb': est_mem_mb,
+                  'storage_budget_mb': (int(storage_budget) if storage_budget else None)}
+        # §14.2 资源决策事件：四维档位「声明 / 自动 / 最终」+ 设备已承诺存储。
+        try:
+            cls._emit_event('resource', {
+                'task_id': sub_task_info.get_task_id(), 'node_id': sub_task_info.get_sub_task_id(),
+                'algorithm': algo, 'device': dno_s,
+                'cores': {'declared': param.get('cores'), 'final': cores},
+                'mem_mb': {'declared': param.get('mem_mb'), 'final': _alloc['mem_budget_mb'],
+                           'auto': bool(param.get('mem_mb') is None and os.environ.get('OPENSAI_AUTO_MEM') and marginal)},
+                'storage_mb': {'declared': param.get('storage_mb'), 'final': _alloc['storage_budget_mb'],
+                               'auto': bool(param.get('storage_mb') is None and os.environ.get('OPENSAI_AUTO_STORAGE') and hist_storage)},
+                'committed_storage_mb': (round(cls.committed_storage_mb.get(dno_s, 0.0), 0) if dno_s else None),
+            })
+        except Exception as _e:
+            logging.debug(f"[event] resource 忽略: {_e}")
+        return _alloc
 
     @classmethod
     def _update_algo_history(cls, algo, metrics):
@@ -323,6 +362,24 @@ class UserServer:
             if v:
                 h[k] = float(v) if h['n'] == 0 else a * float(v) + (1 - a) * h[k]
         h['n'] += 1
+
+    @classmethod
+    def _emit_event(cls, kind, payload):
+        """追加一条决策事件(放置/资源/传输)到环形缓冲，供前端展示决策过程。容错：异常不影响主流程。"""
+        try:
+            with cls.events_lock:
+                cls._event_seq += 1
+                ev = {'seq': cls._event_seq, 'ts': round(time.time(), 3), 'kind': kind}
+                ev.update(payload)
+                cls.decision_events.append(ev)
+        except Exception as e:
+            logging.debug(f"[event] emit 忽略: {e}")
+
+    @classmethod
+    def _events_snapshot(cls):
+        """返回决策事件快照(列表)，供桥接经 eventsInfo 回传前端。"""
+        with cls.events_lock:
+            return list(cls.decision_events)
 
     @classmethod
     def _predecessor_info(cls, sub_task_info):
@@ -559,6 +616,21 @@ class UserServer:
                     _nics = sum(1 for s in sources if not s.get('origin_ip'))
                     logging.info(f"[multipath] task={task_id} sub={node_id} 前驱{p} 多链路源={len(sources)} "
                                  f"(多网卡直连×{_nics}{'+中继' if relay else ''}, size={size_bytes})")
+                # §14.2 传输计划事件：本地直读 / 单链路 / 多链路(中继·多网卡)，含每条物理路径。
+                try:
+                    _srcs = entry.get('sources') or [{'host': src_ip, 'port': src_port}]
+                    _paths = [{'type': ('relay' if s.get('origin_ip') else 'direct'),
+                               'host': s.get('host'), 'port': s.get('port')} for s in _srcs]
+                    cls._emit_event('transfer', {
+                        'task_id': task_id, 'consumer_node': node_id, 'pred_id': p,
+                        'src_device': pred_dev.get_device_no(),
+                        'size': size_bytes, 'rate_mbps': entry.get('rate_mbps'),
+                        'local_read': (pred_dev.get_device_no() == consumer_dno),
+                        'multipath': bool(entry.get('sources')),
+                        'paths': _paths,
+                    })
+                except Exception as _e:
+                    logging.debug(f"[event] transfer 忽略: {_e}")
                 artifacts.append(entry)
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")
@@ -991,6 +1063,13 @@ class UserServer:
                             key = next(iter(data_decode))
                             cls.push_connected_device_info(key)
                             # logging.info(f"接收前端 client 对 base_info 的反馈请求, 将更新结果报文至client")
+
+                        # §14.2 决策事件流：直接在请求方连接上回传事件快照（放置/资源/传输）。
+                        elif 'eventsInfo' in data_decode:
+                            try:
+                                NetworkUtils.send_msg(client_sock, {"eventsInfo": {"events": cls._events_snapshot()}})
+                            except Exception as _e:
+                                logging.debug(f"[event] 回传事件失败: {_e}")
                         
                         # 处理P2P消息
                         elif 'udp_p2p_msg' in data_decode:

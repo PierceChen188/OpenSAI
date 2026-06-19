@@ -67,6 +67,29 @@ class OffloadingImpl():
         return lat + nbytes / max(bw, 1.0)
 
     @classmethod
+    def score_candidates(cls, device_info_list: dict, subtask_info: SubTaskInfo,
+                         pred_info=None, reservations=None):
+        """对每个候选设备按同一代价模型打分，返回按代价升序的明细列表（只读、无副作用）。
+        供 locality_strategy 选最优，也供放置决策事件展示「候选 × 代价分项」。
+        每项: {device, xfer_s, load, cost}。"""
+        reservations = reservations or {}
+        pred_info = pred_info or []
+        out = []
+        for dno in sorted(device_info_list.keys()):
+            info = device_info_list[dno]
+            xfer = sum(cls._transfer_seconds(info, src, b, device_info_list)
+                       for (src, b) in pred_info if src and src != dno)
+            # capacity-aware：负载按「已预留/并行容量」折算——设备有 N 个 worker 可并行，
+            # 故同机塞到 N 个任务几乎不罚分（它们并行跑），超过容量才显著变贵。
+            slots = max(1, int(info.get('worker_slots', 1) or 1))
+            load = reservations.get(dno, 0) / slots
+            cost = cls.W_XFER * xfer + cls.W_LOAD * load
+            out.append({'device': dno, 'xfer_s': round(xfer, 3),
+                        'load': round(load, 3), 'cost': round(cost, 3)})
+        out.sort(key=lambda x: x['cost'])
+        return out
+
+    @classmethod
     def locality_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo,
                           pred_info=None, reservations=None):
         """T3.2 自适应放置：选「预计传输耗时 + 负载延迟」总代价最低的设备。
@@ -77,22 +100,11 @@ class OffloadingImpl():
         if not device_info_list:
             logging.info("无在线设备...")
             return None
-        reservations = reservations or {}
-        pred_info = pred_info or []
-        best, best_cost = None, None
-        for dno in sorted(device_info_list.keys()):
-            info = device_info_list[dno]
-            xfer = sum(cls._transfer_seconds(info, src, b, device_info_list)
-                       for (src, b) in pred_info if src and src != dno)
-            # capacity-aware：负载按「已预留/并行容量」折算——设备有 N 个 worker 可并行，
-            # 故同机塞到 N 个任务几乎不罚分（它们并行跑），超过容量才显著变贵。
-            slots = max(1, int(info.get('worker_slots', 1) or 1))
-            cost = cls.W_XFER * xfer + cls.W_LOAD * (reservations.get(dno, 0) / slots)
-            if best_cost is None or cost < best_cost:
-                best_cost, best = cost, info
+        scored = cls.score_candidates(device_info_list, subtask_info, pred_info, reservations)
+        best_dno = scored[0]['device']
         logging.info(f"[placement] 子任务 {subtask_info.get_sub_task_id()} -> "
-                     f"{best.get('device_no') if best else None} (cost={best_cost:.3f}s, preds={pred_info})")
-        return best
+                     f"{best_dno} (cost={scored[0]['cost']:.3f}s, preds={pred_info or []})")
+        return device_info_list[best_dno]
 
     @classmethod
     def plan_dag(cls, decoded: dict, device_info_list: dict, reservations=None):
