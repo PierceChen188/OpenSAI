@@ -348,5 +348,7 @@ if __name__ == '__main__':
     time.sleep(100)
     '''
 
-    app.run(debug=True)
+    # debug=False / 关闭 reloader：reloader 会再 exec 一个子进程，在 Start-Process(隐藏窗口 + 重定向管道)
+    # 下会导致端口绑定不可靠（曾出现 :5000 起不来）。一键启动脚本用本进程直接 serve。
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
 

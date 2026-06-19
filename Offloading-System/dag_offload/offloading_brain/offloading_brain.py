@@ -19,7 +19,10 @@ class OffloadingImpl():
 
     @classmethod
     def direct_strategy(cls, device_info_list: dict, subtask_info: SubTaskInfo):
-        idx = subtask_info.get_sub_task_direct_allocate_id()
+        try:                                  # 容错：directAllocationId 可能以字符串("2"/"-1")传入
+            idx = int(subtask_info.get_sub_task_direct_allocate_id())
+        except (TypeError, ValueError):
+            idx = -1
         device_size = len(device_info_list)
         # 1-based 索引到“按 device_no 稳定排序”的设备列表。
         # （旧实现是 0-based 且要求 idx>0，导致 idx=0 永远失效，且 dict 顺序不稳定、不可复现。）
@@ -128,7 +131,10 @@ class OffloadingImpl():
             form = nd.get('form', {})
             before[nid] = list(form.get('beforeNodes', []) or [])
             size[nid] = int(form.get('taskInputInfo', {}).get('size_mb', 0) or 0) * 1024 * 1024
-            direct[nid] = form.get('directAllocationId', -1)
+            try:                              # 容错：directAllocationId 可能以字符串传入
+                direct[nid] = int(form.get('directAllocationId', -1))
+            except (TypeError, ValueError):
+                direct[nid] = -1
         succ = {nid: [] for nid in before}
         for c, preds in before.items():
             for p in preds:

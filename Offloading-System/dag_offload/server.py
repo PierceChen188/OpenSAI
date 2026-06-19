@@ -115,7 +115,11 @@ class UserServer:
         healthy_list = cls._healthy_devices(device_info_list)
         # 默认 plan（前瞻整图规划）；设备掉线会自动回退贪心。smart=纯贪心自适应；random=对照。
         mode = os.environ.get('OPENSAI_PLACEMENT', 'plan').lower()
-        if subtask.get_sub_task_direct_allocate_id() != -1:
+        try:                                  # 容错：directAllocationId 可能以字符串传入
+            _dai = int(subtask.get_sub_task_direct_allocate_id())
+        except (TypeError, ValueError):
+            _dai = -1
+        if _dai != -1:
             # 手动指定（directAllocationId>0）：保持原行为不变，用全量列表（不过滤）。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
         elif mode == 'random':
@@ -157,7 +161,7 @@ class UserServer:
         try:
             pred_info = cls._predecessor_info(subtask)
             scored = (OffloadingImpl.score_candidates(healthy_list, subtask, pred_info, cls.reservations)
-                      if mode in ('plan', 'smart') and subtask.get_sub_task_direct_allocate_id() == -1 else [])
+                      if mode in ('plan', 'smart') and _dai == -1 else [])
             filtered = [{'device': d, 'reason': '过载(健康预筛)'}
                         for d in device_info_list if d not in (healthy_list or {})]
             cls._emit_event('placement', {
@@ -616,16 +620,27 @@ class UserServer:
                     _nics = sum(1 for s in sources if not s.get('origin_ip'))
                     logging.info(f"[multipath] task={task_id} sub={node_id} 前驱{p} 多链路源={len(sources)} "
                                  f"(多网卡直连×{_nics}{'+中继' if relay else ''}, size={size_bytes})")
-                # §14.2 传输计划事件：本地直读 / 单链路 / 多链路(中继·多网卡)，含每条物理路径。
+                # §14.2 传输计划事件：本地直读 / 单链路 / 多链路(中继·多网卡)，含每条物理路径(带 device_no 供三维窗映射)。
                 try:
+                    _src_dno = pred_dev.get_device_no()
+                    # endpoint(ip:port) -> device_no，用于把中继路径映射回设备节点。
+                    _ep2dno = {}
+                    for _dn, _di in device_info_list.items():
+                        if _di.get('ip_address') is not None and _di.get('data_port') is not None:
+                            _ep2dno[f"{_di.get('ip_address')}:{int(_di.get('data_port'))}"] = _dn
                     _srcs = entry.get('sources') or [{'host': src_ip, 'port': src_port}]
-                    _paths = [{'type': ('relay' if s.get('origin_ip') else 'direct'),
-                               'host': s.get('host'), 'port': s.get('port')} for s in _srcs]
+                    _paths = []
+                    for s in _srcs:
+                        if s.get('origin_ip'):   # 中继路径：该 host 是中继设备
+                            _dno = _ep2dno.get(f"{s.get('host')}:{int(s.get('port'))}")
+                            _paths.append({'type': 'relay', 'host': s.get('host'), 'port': s.get('port'), 'device': _dno})
+                        else:                    # 直连/多网卡：源设备
+                            _paths.append({'type': 'direct', 'host': s.get('host'), 'port': s.get('port'), 'device': _src_dno})
                     cls._emit_event('transfer', {
                         'task_id': task_id, 'consumer_node': node_id, 'pred_id': p,
-                        'src_device': pred_dev.get_device_no(),
+                        'src_device': _src_dno, 'consumer_device': consumer_dno,
                         'size': size_bytes, 'rate_mbps': entry.get('rate_mbps'),
-                        'local_read': (pred_dev.get_device_no() == consumer_dno),
+                        'local_read': (_src_dno == consumer_dno),
                         'multipath': bool(entry.get('sources')),
                         'paths': _paths,
                     })
