@@ -29,7 +29,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import StreamDataReceived
 
-from config.dataplane_config import ALPN, CERT_FILE, DATA_HOST, DATA_PORT, KEY_FILE
+from config.dataplane_config import ALPN, ARTIFACTS_DIR, CERT_FILE, DATA_HOST, DATA_PORT, KEY_FILE
 from network.dataplane.certs import ensure_cert
 
 _NOT_FOUND = (1 << 64) - 1
@@ -220,6 +220,26 @@ class ArtifactServer:
         供同机前驱「跳过 QUIC、直接本地读」的 locality 优化使用。"""
         p = self._registry.get(artifact_id)
         return p if (p and os.path.exists(p)) else None
+
+    def cleanup_task(self, task_id: str) -> int:
+        """7a：删除某 DAG 任务在本机的全部落盘产物（输出 {task_id}_{node}.blob +
+        拉取的输入 {task_id}_{pred}.in.blob）并清掉 registry 登记。整图完成后由 server
+        通知调用——此时产物必然无下游再需要。返回删除的文件数。
+        注：文件名以 `{task_id}_` 为前缀，下划线分隔避免 task_id 前缀串扰。"""
+        import glob as _glob
+        removed = 0
+        for f in _glob.glob(os.path.join(ARTIFACTS_DIR, _glob.escape(task_id) + "_*")):
+            try:
+                os.remove(f)
+                removed += 1
+            except OSError as e:
+                logging.debug(f"[dataplane] 清理删除 {f} 忽略: {e}")
+        prefix = f"{task_id}:"                       # registry key 形如 'task_id:node_id'
+        for aid in [k for k in list(self._registry) if k.startswith(prefix)]:
+            self._registry.pop(aid, None)
+        if removed:
+            logging.info(f"[dataplane] 清理任务 {task_id} 产物: 删除 {removed} 个文件")
+        return removed
 
     def start(self, wait=True, timeout=10) -> None:
         ensure_cert(self.cert_file, self.key_file)

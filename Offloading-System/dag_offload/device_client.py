@@ -417,6 +417,15 @@ class DeviceClient:
 
                     else:
                         logging.error(f"[ERR] The receive_msg algorithm is not exist. {data_decode['msg']['algo_name']}")
+                elif NetworkUtils.is_dict(data_decode) and 'artifact_cleanup' in data_decode:
+                    # 7a：整图完成，server 通知删除该任务在本机的产物（输出 + 拉取的输入）
+                    _tid = data_decode.get('task_id')
+                    if _tid and cls.artifact_server is not None:
+                        try:
+                            n = cls.artifact_server.cleanup_task(_tid)
+                            logging.info(f"[dataplane] 收到清理指令 task={_tid}: 删除 {n} 个产物")
+                        except Exception as e:
+                            logging.debug(f"[dataplane] 清理 task={_tid} 忽略: {e}")
                 elif NetworkUtils.is_dict(data_decode) and 'SERVER RESPONSE IP' in data_decode:
                     # 服务器响应心跳：收到 ACK 的时刻 - 最近一次心跳发送时刻 = 真实 RTT
                     if cls.last_hb_sent:

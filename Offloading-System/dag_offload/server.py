@@ -508,6 +508,33 @@ class UserServer:
         return artifacts
 
     @classmethod
+    def _cleanup_task_artifacts(cls, task_id):
+        """7a：整图完成后，通知所有承担过该任务子任务的设备删除其落盘产物。
+        此时 DAG 已全部 FINISH，产物必然无下游再需要 → 删除是安全的。
+        通知尽力而为：某设备掉线/发送失败不影响其它（设备侧另有 TTL 兜底，见 7b）。"""
+        try:
+            devs = set()
+            for st in (cls.all_task_dict.get(task_id, {}) or {}).get("queue", []):
+                di = st.get_device_info()
+                dno = di.get_device_no() if di else None
+                if dno:
+                    devs.add(dno)
+            msg = {'artifact_cleanup': True, 'task_id': task_id}
+            sent = 0
+            for dno in devs:
+                sock = cls.client_sockets.get(dno)
+                if not sock:
+                    continue
+                try:
+                    NetworkUtils.send_msg(sock, msg)
+                    sent += 1
+                except Exception as e:
+                    logging.debug(f"[cleanup] 通知设备 {dno} 失败: {e}")
+            logging.info(f"[cleanup] 任务 {task_id} 完成，已通知 {sent}/{len(devs)} 台设备清理产物")
+        except Exception as e:
+            logging.error(f"[cleanup] 任务 {task_id} 清理通知异常(已忽略): {e}")
+
+    @classmethod
     # 子线程2：处理 ready_subtask_queue 中的就绪子任务
     def handle_ready_subtasks(cls):
         logging.info('The thread for handling ready subtasks start...')
@@ -861,6 +888,7 @@ class UserServer:
                                             # 整个DAG任务已完成
                                             logging.info(f"DAG任务{task_id}总体已完成, 将发送结果报文至client")
                                             cls.placement_plan.pop(task_id, None)   # 释放前瞻规划缓存
+                                            cls._cleanup_task_artifacts(task_id)    # 7a 通知涉及设备删除该任务落盘产物
                                             result_dict = cls.summarize_task_result(task_id)
                                             # 发送给对应的用户客户端
                                             for username, addr in user_dict.items():
