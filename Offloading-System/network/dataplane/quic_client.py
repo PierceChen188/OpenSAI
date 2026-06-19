@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import ssl
 import threading
 import time
@@ -185,6 +186,76 @@ def fetch_range(host: str, port: int, artifact_id: str, offset: int, length: int
     fut = asyncio.run_coroutine_threadsafe(
         _fetch_pooled(host, int(port), artifact_id, rate_mbps, int(offset), int(length)), loop)
     return fut.result(timeout)
+
+
+def fetch_striped(sources, artifact_id: str, dest_path: str, total_size: int,
+                  chunk_size: int = 2 * 1024 * 1024, timeout: float = 120, rate_mbps=None) -> dict:
+    """多链路分条带拉取：把 artifact 切成定长块，用 **work-stealing** 在多条路径上并行拉取，
+    按偏移 seek 写入 dest_path 重组。
+      sources: [(host,port), ...] —— 都能拉到同一 artifact 的路径（直连 + 中继）。
+      total_size: 产物总字节数（大脑下发 / 调用方提供）。
+    每条路径空闲就抢下一块 -> 自动按实际速度平衡；某块在一条路径失败则重新入队由其它路径重试。
+    返回 {'bytes','elapsed','dest','chunks'}。"""
+    t0 = time.time()
+    n = int(total_size)
+    dd = os.path.dirname(os.path.abspath(dest_path))
+    if dd:
+        os.makedirs(dd, exist_ok=True)
+    with open(dest_path, 'wb') as f:          # 预建到总大小，便于各块按偏移写入
+        if n > 0:
+            f.truncate(n)
+    if n <= 0:
+        return {'bytes': 0, 'elapsed': time.time() - t0, 'dest': dest_path, 'chunks': 0}
+
+    pending = queue.Queue()
+    off = 0
+    total_chunks = 0
+    while off < n:
+        ln = min(chunk_size, n - off)
+        pending.put({'off': off, 'len': ln, 'retries': 0})
+        off += ln
+        total_chunks += 1
+
+    write_lock = threading.Lock()
+    fh = open(dest_path, 'r+b')
+    done = {'ok': 0}
+    errors = []
+    MAX_RETRY = 3
+
+    def worker(src):
+        host, port = src
+        while True:
+            try:
+                ch = pending.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                data = fetch_range(host, port, artifact_id, ch['off'], ch['len'],
+                                   timeout=timeout, rate_mbps=rate_mbps)
+                with write_lock:
+                    fh.seek(ch['off'])
+                    fh.write(data)
+                    done['ok'] += 1
+            except Exception as e:           # 该块本路径失败 -> 退避后重新入队，由其它路径重试
+                ch['retries'] += 1
+                if ch['retries'] <= MAX_RETRY:
+                    time.sleep(0.05)
+                    pending.put(ch)
+                else:
+                    errors.append((ch['off'], ch['len'], str(e)))
+
+    threads = [threading.Thread(target=worker, args=(s,), daemon=True) for s in sources]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout)
+    try:
+        fh.flush()
+    finally:
+        fh.close()
+    if done['ok'] != total_chunks or errors:
+        raise IOError(f"分条带传输不完整: ok={done['ok']}/{total_chunks}, errors={errors[:3]}")
+    return {'bytes': n, 'elapsed': time.time() - t0, 'dest': dest_path, 'chunks': total_chunks}
 
 
 def close_all() -> None:

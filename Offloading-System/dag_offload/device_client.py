@@ -14,7 +14,7 @@ from device.device_monitor import DeviceMonitor, get_gl_device_no
 from device.implements.actuator_impl import ActuatorImpl
 from network.utils.network_utils import NetworkUtils
 from network.dataplane.quic_server import ArtifactServer
-from network.dataplane.quic_client import fetch_blob
+from network.dataplane.quic_client import fetch_blob, fetch_striped
 from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
 from dag_offload.task_pool import build_pool, run_task
 from concurrent.futures.process import BrokenProcessPool
@@ -164,8 +164,14 @@ class DeviceClient:
             # rate_mbps 由 server 在 input_artifacts 里给出（按任务分配带宽，T5.3）；None=不限。
             def _pull(item):
                 _pid, _art, _local = item
-                _stats = fetch_blob(_art['src_ip'], int(_art['src_port']), _art['artifact_id'], _local,
-                                    rate_mbps=_art.get('rate_mbps'))
+                _srcs = _art.get('sources')   # 多链路：[[ip,port], ...]（直连+中继）；含 size 才启用分条带
+                if _srcs and _art.get('size'):
+                    _pairs = [(s[0], int(s[1])) for s in _srcs]
+                    _stats = fetch_striped(_pairs, _art['artifact_id'], _local, int(_art['size']),
+                                           rate_mbps=_art.get('rate_mbps'))
+                else:
+                    _stats = fetch_blob(_art['src_ip'], int(_art['src_port']), _art['artifact_id'], _local,
+                                        rate_mbps=_art.get('rate_mbps'))
                 return _pid, _local, _stats
 
             if remote:
