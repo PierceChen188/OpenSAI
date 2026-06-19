@@ -18,6 +18,7 @@ from network.dataplane.quic_client import fetch_blob
 from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
 from dag_offload.task_pool import build_pool, run_task
 from concurrent.futures.process import BrokenProcessPool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 name = "DEVICE_" + get_gl_device_no()
 
@@ -147,6 +148,7 @@ class DeviceClient:
 
             # ---- 数据面：拉取前驱产物，注入 _artifact_in（pred_id -> 本地文件） ----
             artifact_in = {}
+            remote = []   # 需经网络拉取的前驱: (pred_id, art, local)
             for art in (msg.get('input_artifacts') or []):
                 pred_id = art.get('pred_id')
                 # locality 优化：若该前驱产物就在本机（同机放置），直接本地读，跳过 QUIC 传输。
@@ -156,17 +158,30 @@ class DeviceClient:
                     logging.info(f"[dataplane] 前驱产物 {art['artifact_id']} 在本机，直接本地读取（跳过传输）")
                     continue
                 local = os.path.join(ARTIFACTS_DIR, f"{task_id}_{pred_id}.in.blob")
-                try:
-                    # rate_mbps 由 server 在 input_artifacts 里给出（适配优化按任务分配带宽，T5.3）；None=不限。
-                    stats = fetch_blob(art['src_ip'], int(art['src_port']), art['artifact_id'], local,
-                                       rate_mbps=art.get('rate_mbps'))
-                    artifact_in[pred_id] = local
-                    cls._record_link(art['src_ip'], art['src_port'], stats)
-                    logging.info(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{pred_id}产物 "
-                                 f"{art['artifact_id']} 自 {art['src_ip']}:{art['src_port']} "
-                                 f"({stats['bytes']} bytes, {stats['elapsed']:.3f}s)")
-                except Exception as e:
-                    logging.error(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{pred_id}产物失败 {art}: {e}")
+                remote.append((pred_id, art, local))
+
+            # 多前驱并发拉取：不同源各走自身链路并行，同源复用长连接多 stream。
+            # rate_mbps 由 server 在 input_artifacts 里给出（按任务分配带宽，T5.3）；None=不限。
+            def _pull(item):
+                _pid, _art, _local = item
+                _stats = fetch_blob(_art['src_ip'], int(_art['src_port']), _art['artifact_id'], _local,
+                                    rate_mbps=_art.get('rate_mbps'))
+                return _pid, _local, _stats
+
+            if remote:
+                with ThreadPoolExecutor(max_workers=min(8, len(remote))) as _ex:
+                    _futs = {_ex.submit(_pull, it): it for it in remote}
+                    for _f in as_completed(_futs):
+                        _pid, _art, _local = _futs[_f]
+                        try:
+                            _pid, _local, _stats = _f.result()
+                            artifact_in[_pid] = _local
+                            cls._record_link(_art['src_ip'], _art['src_port'], _stats)
+                            logging.info(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{_pid}产物 "
+                                         f"{_art['artifact_id']} 自 {_art['src_ip']}:{_art['src_port']} "
+                                         f"({_stats['bytes']} bytes, {_stats['elapsed']:.3f}s)")
+                        except Exception as e:
+                            logging.error(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{_pid}产物失败 {_art}: {e}")
             if artifact_in:
                 param_dict['_artifact_in'] = artifact_in
 
