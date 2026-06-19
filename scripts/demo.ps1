@@ -35,14 +35,18 @@ function Start-Py([string]$script, [string]$tag) {
 }
 
 # 1) Redis ---------------------------------------------------------------
-& $redisCli ping 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
+# Probe redis-cli via cmd /c: when Redis is down it writes "connection refused"
+# to stderr, which under PS5.1 + ErrorActionPreference=Stop becomes a TERMINATING
+# error and aborts the whole script before Redis can be started. Running it inside
+# cmd with 2>nul swallows stderr at the cmd level, so PS only gets stdout.
+function Test-Redis { return ((cmd /c "`"$redisCli`" ping 2>nul") -match 'PONG') }
+if (-not (Test-Redis)) {
     Write-Host "Starting Redis..." -ForegroundColor Yellow
     Start-Process -FilePath $redisExe -ArgumentList '--port 6379 --save "" --appendonly no' -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
-if ((& $redisCli ping 2>$null) -ne 'PONG') { Write-Host "Redis not responding on 6379" -ForegroundColor Red; exit 1 }
-& $redisCli flushall | Out-Null
+if (-not (Test-Redis)) { Write-Host "Redis not responding on 6379" -ForegroundColor Red; exit 1 }
+cmd /c "`"$redisCli`" flushall >nul 2>nul"
 Write-Host "Redis: PONG" -ForegroundColor Green
 
 # 2) stop stale processes ------------------------------------------------
@@ -70,15 +74,17 @@ Start-Sleep -Seconds 3
 
 # 4) 3 heterogeneous devices (strong/medium/weak) — 3 is the reliable spawn zone
 #    on Windows and is enough for relay multipath (source + consumer + relay).
-$specs = @(@{port=9971;workers=3}, @{port=9972;workers=2}, @{port=9973;workers=1})
+# Smaller pools (2/2/1) spawn faster and more reliably than larger ones; wider
+# stagger (5s) avoids concurrent process-pool spawn contention on Windows.
+$specs = @(@{port=9971;workers=2}, @{port=9972;workers=2}, @{port=9973;workers=1})
 $env:OPENSAI_PROBE_INTERVAL = '600'
-$env:OPENSAI_POOL_WARMUP_S  = '45'
+$env:OPENSAI_POOL_WARMUP_S  = '40'
 foreach ($s in $specs) {
     $env:OPENSAI_DATA_PORT    = "$($s.port)"
     $env:OPENSAI_TASK_WORKERS = "$($s.workers)"
     $dpid = Start-Py 'run_device.py' "dev$($s.port)"
     Write-Host "device :$($s.port) (workers=$($s.workers)) -> PID $dpid" -ForegroundColor Green
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 5
 }
 
 # 5) web bridge ----------------------------------------------------------
@@ -90,7 +96,7 @@ Write-Host "Waiting for cluster to come online..." -ForegroundColor Yellow
 $n = 0; $web = 0
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 2
-    $n = [int](& $redisCli scard DEVICE_ONLINE_SET)
+    $n = [int](cmd /c "`"$redisCli`" scard DEVICE_ONLINE_SET 2>nul")
     $web = (Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
     if (($n -ge 3) -and ($web -ge 1)) { break }
 }
