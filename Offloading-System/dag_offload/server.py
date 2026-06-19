@@ -162,15 +162,18 @@ class UserServer:
             pred_info = cls._predecessor_info(subtask)
             scored = (OffloadingImpl.score_candidates(healthy_list, subtask, pred_info, cls.reservations)
                       if mode in ('plan', 'smart') and _dai == -1 else [])
-            filtered = [{'device': d, 'reason': '过载(健康预筛)'}
+            _nm = lambda d: cls._dev_name(device_info_list, d)   # device_no -> 设备名(与前端设备 id 一致)
+            filtered = [{'device': _nm(d), 'reason': '过载(健康预筛)'}
                         for d in device_info_list if d not in (healthy_list or {})]
+            scored_named = [{'device': _nm(s['device']), 'xfer_s': s['xfer_s'],
+                             'load': s['load'], 'cost': s['cost']} for s in scored]
             cls._emit_event('placement', {
                 'task_id': subtask.get_task_id(), 'node_id': subtask.get_sub_task_id(),
                 'algorithm': subtask.get_task_algorithm(), 'mode': mode,
-                'chosen': dno,
-                'candidates': sorted((healthy_list or {}).keys()),
+                'chosen': _nm(dno),
+                'candidates': [_nm(d) for d in sorted((healthy_list or {}).keys())],
                 'filtered': filtered,
-                'scores': scored,
+                'scores': scored_named,
                 'locality_hit': any(src == dno for (src, _b) in pred_info),
             })
         except Exception as _e:
@@ -341,7 +344,7 @@ class UserServer:
         try:
             cls._emit_event('resource', {
                 'task_id': sub_task_info.get_task_id(), 'node_id': sub_task_info.get_sub_task_id(),
-                'algorithm': algo, 'device': dno_s,
+                'algorithm': algo, 'device': ((dev_dict or {}).get('device_name') or dno_s),
                 'cores': {'declared': param.get('cores'), 'final': cores},
                 'mem_mb': {'declared': param.get('mem_mb'), 'final': _alloc['mem_budget_mb'],
                            'auto': bool(param.get('mem_mb') is None and os.environ.get('OPENSAI_AUTO_MEM') and marginal)},
@@ -384,6 +387,15 @@ class UserServer:
         """返回决策事件快照(列表)，供桥接经 eventsInfo 回传前端。"""
         with cls.events_lock:
             return list(cls.decision_events)
+
+    @classmethod
+    def _dev_name(cls, device_info_list, dno):
+        """device_no(UUID) -> 设备显示名(device_name)。前端设备列表用 device_name 作 id，
+        故决策事件里的设备引用也要用 device_name，才能在三维窗口/决策页正确映射到设备。"""
+        if not dno:
+            return dno
+        info = (device_info_list or {}).get(dno) or {}
+        return info.get('device_name') or dno
 
     @classmethod
     def _predecessor_info(cls, sub_task_info):
@@ -633,12 +645,15 @@ class UserServer:
                     for s in _srcs:
                         if s.get('origin_ip'):   # 中继路径：该 host 是中继设备
                             _dno = _ep2dno.get(f"{s.get('host')}:{int(s.get('port'))}")
-                            _paths.append({'type': 'relay', 'host': s.get('host'), 'port': s.get('port'), 'device': _dno})
+                            _paths.append({'type': 'relay', 'host': s.get('host'), 'port': s.get('port'),
+                                           'device': cls._dev_name(device_info_list, _dno)})
                         else:                    # 直连/多网卡：源设备
-                            _paths.append({'type': 'direct', 'host': s.get('host'), 'port': s.get('port'), 'device': _src_dno})
+                            _paths.append({'type': 'direct', 'host': s.get('host'), 'port': s.get('port'),
+                                           'device': cls._dev_name(device_info_list, _src_dno)})
                     cls._emit_event('transfer', {
                         'task_id': task_id, 'consumer_node': node_id, 'pred_id': p,
-                        'src_device': _src_dno, 'consumer_device': consumer_dno,
+                        'src_device': cls._dev_name(device_info_list, _src_dno),
+                        'consumer_device': cls._dev_name(device_info_list, consumer_dno),
                         'size': size_bytes, 'rate_mbps': entry.get('rate_mbps'),
                         'local_read': (_src_dno == consumer_dno),
                         'multipath': bool(entry.get('sources')),
