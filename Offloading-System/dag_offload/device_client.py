@@ -162,11 +162,11 @@ class DeviceClient:
                                        rate_mbps=art.get('rate_mbps'))
                     artifact_in[pred_id] = local
                     cls._record_link(art['src_ip'], art['src_port'], stats)
-                    logging.info(f"[dataplane] 拉取前驱产物 {art['artifact_id']} 自 "
-                                 f"{art['src_ip']}:{art['src_port']} "
+                    logging.info(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{pred_id}产物 "
+                                 f"{art['artifact_id']} 自 {art['src_ip']}:{art['src_port']} "
                                  f"({stats['bytes']} bytes, {stats['elapsed']:.3f}s)")
                 except Exception as e:
-                    logging.error(f"[dataplane] 拉取前驱产物失败 {art}: {e}")
+                    logging.error(f"[dataplane] task={task_id} sub={node_id} 拉取前驱{pred_id}产物失败 {art}: {e}")
             if artifact_in:
                 param_dict['_artifact_in'] = artifact_in
 
@@ -232,7 +232,12 @@ class DeviceClient:
                 except OSError:
                     out_bytes = 0
 
-            logging.info(f"任务计算结果： {result_1}")
+            _res_str = str(result_1)
+            if _res_str.startswith('ERROR') or _res_str.startswith('MISSING'):
+                logging.warning(f"[task] task={task_id} sub={node_id} algo={msg['algo_name']} "
+                                f"dev={get_gl_device_no()} 失败: {_res_str[:300]}")
+            else:
+                logging.info(f"[task] task={task_id} sub={node_id} algo={msg['algo_name']} 完成: {_res_str[:200]}")
 
             # 构建响应消息
             msg_dict = {'task_id': data_decode['msg']['task_id'],
@@ -291,8 +296,8 @@ class DeviceClient:
                 ms_s = elapsed * 1000 if 'last_ms' not in prev else a * elapsed * 1000 + (1 - a) * prev['last_ms']
                 cls.observed_links[key] = {'mbps': round(mbps_s, 3), 'last_ms': round(ms_s, 2),
                                            'bytes': nbytes, 'samples': prev.get('samples', 0) + 1}
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"[link] 链路遥测打点失败(忽略): {e}")
 
     @classmethod
     def _probe_loop(cls):
