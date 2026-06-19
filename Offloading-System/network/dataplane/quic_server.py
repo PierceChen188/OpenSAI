@@ -241,6 +241,60 @@ class ArtifactServer:
             logging.info(f"[dataplane] 清理任务 {task_id} 产物: 删除 {removed} 个文件")
         return removed
 
+    def _gc_once(self, ttl_s, max_mb) -> int:
+        """7b：删除超 TTL 的陈旧产物；若总占用超水位再按 LRU(最旧优先)删到水位下；
+        清理 registry 失效项。跳过探测文件 __probe*。TTL 足够长 → 不会误删仍在执行任务的产物
+        （7a 在任务完成时已即时清理；本扫描兜底异常未收尾 / 历史遗留的产物）。返回删除数。"""
+        import glob as _glob
+        now = time.time()
+        removed = 0
+        files = []
+        for f in _glob.glob(os.path.join(ARTIFACTS_DIR, "*.blob")):
+            if "__probe" in os.path.basename(f):
+                continue
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            files.append([f, st.st_mtime, st.st_size])
+        if ttl_s and ttl_s > 0:                       # TTL：删超龄
+            for it in files:
+                if now - it[1] > ttl_s:
+                    try:
+                        os.remove(it[0]); removed += 1; it[0] = None
+                    except OSError as e:
+                        logging.debug(f"[dataplane] GC 删除 {it[0]} 忽略: {e}")
+        if max_mb and max_mb > 0:                     # 水位：按 LRU 删到 max_mb 以下
+            alive = [it for it in files if it[0] is not None]
+            total = sum(it[2] for it in alive)
+            cap = max_mb * 1024 * 1024
+            for it in sorted(alive, key=lambda x: x[1]):   # oldest first
+                if total <= cap:
+                    break
+                try:
+                    os.remove(it[0]); removed += 1; total -= it[2]
+                except OSError as e:
+                    logging.debug(f"[dataplane] GC 水位删除 {it[0]} 忽略: {e}")
+        for aid in [k for k, p in list(self._registry.items()) if not os.path.exists(p)]:
+            self._registry.pop(aid, None)             # 清 registry 失效项
+        if removed:
+            logging.info(f"[dataplane] GC 扫描: 删除 {removed} 个陈旧产物 (TTL={ttl_s}s, 上限={max_mb}MB)")
+        return removed
+
+    def start_gc(self, ttl_s, max_mb, interval_s) -> None:
+        """启动后台 GC 线程；TTL 与水位都未启用则不开。"""
+        if (not ttl_s or ttl_s <= 0) and (not max_mb or max_mb <= 0):
+            return
+        def _loop():
+            while True:
+                time.sleep(interval_s)
+                try:
+                    self._gc_once(ttl_s, max_mb)
+                except Exception as e:
+                    logging.debug(f"[dataplane] GC 循环忽略: {e}")
+        threading.Thread(target=_loop, daemon=True, name='artifact-gc').start()
+        logging.info(f"[dataplane] artifact GC 启动: TTL={ttl_s}s, 上限={max_mb}MB, 间隔={interval_s}s")
+
     def start(self, wait=True, timeout=10) -> None:
         ensure_cert(self.cert_file, self.key_file)
         self._thread = threading.Thread(target=self._run_thread, daemon=True)

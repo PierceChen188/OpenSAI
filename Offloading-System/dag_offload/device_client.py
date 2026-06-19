@@ -540,6 +540,11 @@ class DeviceClient:
         cls.artifact_server = ArtifactServer(port=DATA_PORT)
         cls.artifact_server.start()
         logging.info(f"数据面 ArtifactServer 已启动: 端口 {DATA_PORT}, 产物目录 {ARTIFACTS_DIR}")
+        # 7b：产物 GC 兜底——删超 TTL 的陈旧产物 + 超水位按 LRU 回收（补 7a 在任务异常未收尾/历史遗留时的缺口）。
+        cls.artifact_server.start_gc(
+            ttl_s=float(os.environ.get('OPENSAI_ARTIFACT_TTL_S', '3600') or 0),      # 默认 1h
+            max_mb=float(os.environ.get('OPENSAI_ARTIFACT_MAX_MB', '0') or 0),       # 默认 0=不限(opt-in 水位)
+            interval_s=float(os.environ.get('OPENSAI_ARTIFACT_GC_INTERVAL_S', '600') or 600))  # 默认 10min
 
         # T1.2 主动探测：提供一个固定大小的探测块，供其它设备测量到本机的链路带宽/时延。
         probe_path = os.path.join(ARTIFACTS_DIR, '__probe__.blob')
