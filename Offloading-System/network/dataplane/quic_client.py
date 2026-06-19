@@ -31,13 +31,14 @@ class _BlobClientProtocol(QuicConnectionProtocol):
         self._recv = {}      # stream_id -> 收到的字节
         self._waiters = {}   # stream_id -> Future
 
-    async def fetch(self, artifact_id: str, rate_mbps=None, offset=None, length=None) -> bytes:
+    async def fetch(self, artifact_id: str, rate_mbps=None, offset=None, length=None, origin=None) -> bytes:
         sid = self._quic.get_next_available_stream_id()
         fut = asyncio.get_running_loop().create_future()
         self._waiters[sid] = fut
         self._recv[sid] = bytearray()
-        # 带限速/范围时发结构化请求；否则发裸 artifact_id（向后兼容）。
-        if (rate_mbps and rate_mbps > 0) or offset or (length is not None):
+        # 带限速/范围/中继回源时发结构化请求；否则发裸 artifact_id（向后兼容）。
+        # origin=(ip,port)：告诉对端“你若没有就去 origin 回源拉取”（中继代理）。
+        if (rate_mbps and rate_mbps > 0) or offset or (length is not None) or origin:
             req_obj = {'id': artifact_id}
             if rate_mbps and rate_mbps > 0:
                 req_obj['rate_mbps'] = rate_mbps
@@ -45,6 +46,9 @@ class _BlobClientProtocol(QuicConnectionProtocol):
                 req_obj['offset'] = int(offset)
             if length is not None:
                 req_obj['length'] = int(length)
+            if origin:
+                req_obj['origin_ip'] = origin[0]
+                req_obj['origin_port'] = int(origin[1])
             req = json.dumps(req_obj).encode('utf-8')
         else:
             req = artifact_id.encode('utf-8')
@@ -142,13 +146,13 @@ async def _get_conn(host: str, port: int) -> _Conn:
 
 
 async def _fetch_pooled(host: str, port: int, artifact_id: str, rate_mbps,
-                        offset=None, length=None) -> bytes:
+                        offset=None, length=None, origin=None) -> bytes:
     key = (host, int(port))
     last_exc = None
     for _attempt in range(2):                # 连接失效 -> 剔除、关闭、重连重试一次
         conn = await _get_conn(host, port)
         try:
-            return await conn.protocol.fetch(artifact_id, rate_mbps, offset, length)
+            return await conn.protocol.fetch(artifact_id, rate_mbps, offset, length, origin)
         except FileNotFoundError:            # 应用级：对端无此产物，不重试
             raise
         except Exception as e:               # 可能是连接断开 -> 剔除后重连重试
@@ -179,12 +183,13 @@ def fetch_blob(host: str, port: int, artifact_id: str,
 
 
 def fetch_range(host: str, port: int, artifact_id: str, offset: int, length: int,
-                timeout: float = 120, rate_mbps=None) -> bytes:
+                timeout: float = 120, rate_mbps=None, origin=None) -> bytes:
     """拉取 artifact 的 [offset, offset+length) 字节段并返回原始字节（多链路分条带用）。
-    复用按源设备的长连接；并发调用在常驻循环上以多 stream 并行。"""
+    复用按源设备的长连接；并发调用在常驻循环上以多 stream 并行。
+    origin=(ip,port)：向中继请求时告知回源地址（中继本机没有则去 origin 拉该段）。"""
     loop = _get_loop()
     fut = asyncio.run_coroutine_threadsafe(
-        _fetch_pooled(host, int(port), artifact_id, rate_mbps, int(offset), int(length)), loop)
+        _fetch_pooled(host, int(port), artifact_id, rate_mbps, int(offset), int(length), origin), loop)
     return fut.result(timeout)
 
 
@@ -223,7 +228,12 @@ def fetch_striped(sources, artifact_id: str, dest_path: str, total_size: int,
     MAX_RETRY = 3
 
     def worker(src):
-        host, port = src
+        # src 可为 (host,port) 直连，或 dict{'host','port','origin_ip'?,'origin_port'?} 中继。
+        if isinstance(src, dict):
+            host, port = src['host'], int(src['port'])
+            origin = ((src['origin_ip'], int(src['origin_port'])) if src.get('origin_ip') else None)
+        else:
+            host, port, origin = src[0], int(src[1]), None
         while True:
             try:
                 ch = pending.get_nowait()
@@ -231,7 +241,7 @@ def fetch_striped(sources, artifact_id: str, dest_path: str, total_size: int,
                 return
             try:
                 data = fetch_range(host, port, artifact_id, ch['off'], ch['len'],
-                                   timeout=timeout, rate_mbps=rate_mbps)
+                                   timeout=timeout, rate_mbps=rate_mbps, origin=origin)
                 with write_lock:
                     fh.seek(ch['off'])
                     fh.write(data)
