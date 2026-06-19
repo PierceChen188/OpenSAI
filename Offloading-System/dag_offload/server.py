@@ -397,6 +397,24 @@ class UserServer:
             time.sleep(0.01)  # 指定间隔检查一次
 
     @classmethod
+    def _multinic_sources(cls, src_ip, src_port, dev, size_bytes):
+        """P0-1c 多网卡聚合：源设备若上报了多张可用 NIC（nic_ips）且产物够大，返回该设备的多个
+        (host,port) 直连源（主 IP + 其余 NIC，去重保序）—— 消费者会对不同目的 IP 建独立连接，
+        由路由表把各连接从匹配网卡发出，带宽叠加。否则返回 [主直连]。受 OPENSAI_MULTINIC 控制。
+        默认关闭 → 单网卡/同构环境只回 1 个源，不影响现有直连路径与回归。"""
+        primary = {'host': src_ip, 'port': src_port}
+        if os.environ.get('OPENSAI_MULTINIC', '0') in ('0', '', 'false', 'False'):
+            return [primary]
+        min_mb = float(os.environ.get('OPENSAI_MULTINIC_MIN_MB', '8') or 8)
+        if not size_bytes or size_bytes < min_mb * 1024 * 1024:
+            return [primary]
+        hosts, seen = [src_ip], {src_ip}
+        for ip in (dev.get('nic_ips') or []):
+            if ip and ip not in seen:
+                seen.add(ip); hosts.append(ip)
+        return [{'host': h, 'port': src_port} for h in hosts]
+
+    @classmethod
     def _pick_relay(cls, consumer_dno, src_dno, src_ip, src_port, size_bytes, device_info_list):
         """P0-1b 多链路中继选择：仅当 OPENSAI_MULTIPATH 开启、产物够大、且存在某中继 R 使
         min(src→R, R→consumer) 明显快于直连 consumer→src 时，返回 (relay_ip, relay_port)，否则 None。
@@ -468,20 +486,22 @@ class UserServer:
                     # T3.2-A：按需求(声明/A2自动按数据量) + 源设备带宽预算，分配这条传输的限速(MB/s)；None=不限。
                     'rate_mbps': cls._artifact_rate_mbps(sub_task_info, pred_dev.get_device_no(), pred_node_id=p),
                 }
-                # P0-1b 多链路：直连带宽不足且存在更快中继时，附 sources(直连+中继)+size 激活分条带聚合。
+                # 多链路：组合 P0-1c 多网卡直连源 + P0-1b 中继源；≥2 个源才附 sources+size 激活分条带聚合。
                 size_bytes = cls.output_sizes.get((task_id, p), 0)
+                src_ip, src_port = dev.get('ip_address'), dev.get('data_port')
+                sources = cls._multinic_sources(src_ip, src_port, dev, size_bytes)   # 直连（可能多网卡）
                 relay = cls._pick_relay(consumer_dno, pred_dev.get_device_no(),
-                                        dev.get('ip_address'), dev.get('data_port'),
-                                        size_bytes, device_info_list)
+                                        src_ip, src_port, size_bytes, device_info_list)
                 if relay:
+                    sources = list(sources)
+                    sources.append({'host': relay[0], 'port': relay[1],
+                                    'origin_ip': src_ip, 'origin_port': src_port})
+                if len(sources) >= 2:
                     entry['size'] = size_bytes
-                    entry['sources'] = [
-                        {'host': dev.get('ip_address'), 'port': dev.get('data_port')},
-                        {'host': relay[0], 'port': relay[1],
-                         'origin_ip': dev.get('ip_address'), 'origin_port': dev.get('data_port')},
-                    ]
-                    logging.info(f"[multipath] task={task_id} sub={node_id} 前驱{p} 启用中继 "
-                                 f"{relay[0]}:{relay[1]}（直连+中继分条带, size={size_bytes}）")
+                    entry['sources'] = sources
+                    _nics = sum(1 for s in sources if not s.get('origin_ip'))
+                    logging.info(f"[multipath] task={task_id} sub={node_id} 前驱{p} 多链路源={len(sources)} "
+                                 f"(多网卡直连×{_nics}{'+中继' if relay else ''}, size={size_bytes})")
                 artifacts.append(entry)
             except Exception as e:
                 logging.error(f"构造前驱{p}产物拉取项失败: {e}")

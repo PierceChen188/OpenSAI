@@ -80,6 +80,34 @@ class DeviceClient:
     peers = []                        # 在线对端清单(来自心跳ACK): [{device_no,ip_address,data_port}]
     PROBE_ID = '__probe__'            # 主动探测用的固定 artifact id
     PROBE_INTERVAL = int(os.environ.get('OPENSAI_PROBE_INTERVAL', '20'))  # 秒；主动探测间隔
+    _nic_ips_cache = None             # P0-1c 多网卡：本机可用 NIC IPv4 列表（枚举一次后缓存）
+
+    @classmethod
+    def _local_nic_ips(cls):
+        """P0-1c 多网卡聚合：本机可对外提供数据面的 NIC IPv4 列表（去回环/链路本地、去重）。
+        可用 OPENSAI_NIC_IPS="ip1,ip2" 显式覆盖（单机验证：用 127.0.0.1+本机LAN IP 模拟两张网卡）。"""
+        if cls._nic_ips_cache is not None:
+            return cls._nic_ips_cache
+        env = os.environ.get('OPENSAI_NIC_IPS', '').strip()
+        ips = []
+        if env:
+            ips = [x.strip() for x in env.split(',') if x.strip()]
+        else:
+            try:
+                import psutil
+                for _name, addrs in psutil.net_if_addrs().items():
+                    for a in addrs:
+                        if a.family == socket.AF_INET and a.address \
+                                and not a.address.startswith(('127.', '169.254.')):
+                            ips.append(a.address)
+            except Exception as e:
+                logging.debug(f"[multinic] 枚举网卡失败，回退单 IP: {e}")
+        seen, out = set(), []          # 去重保序
+        for ip in ips:
+            if ip not in seen:
+                seen.add(ip); out.append(ip)
+        cls._nic_ips_cache = out
+        return out
 
     @classmethod
     # def execute_task(cls, algorithm_name, param_dict, data_dict):
@@ -428,6 +456,7 @@ class DeviceClient:
             device_info['heart_beat'] = True
             device_info['device_no'] = get_gl_device_no()
             device_info['data_port'] = DATA_PORT  # 数据面端口，供 server 告知后继“去哪拉产物”
+            device_info['nic_ips'] = cls._local_nic_ips()  # P0-1c 多网卡：本机其余可用 NIC，供大脑多链路并行
             device_info.update(cls.calculate_network_metrics(sock, addr))  # throughput/bandwidth/network_usage 仍为占位
             # —— 真实监测信号（覆盖占位值）——
             device_info['work_status'] = cls.running_tasks            # 正在执行的任务数
