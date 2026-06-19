@@ -16,6 +16,7 @@ from device.bean.devce_info import DeviceInfo
 from network.utils.network_utils import NetworkUtils
 from network.protocol.packet_protocol_conversion import PacketProtocolConversion
 from predis.implements.device_service_impl import DeviceServiceImpl
+from device.implements.idle_device_impl import IdleDeviceImpl
 from device.implements.actuator_impl import ActuatorImpl
 from task.bean.sub_task_info import SubTaskInfo
 from offloading_brain.offloading_brain import OffloadingImpl
@@ -75,38 +76,63 @@ class UserServer:
             node['result']['deviceId'] = task_dict["queue"][node['id'] - 1].get_subtask_device()
 
     @classmethod
+    def _healthy_devices(cls, device_info_list):
+        """6a 资源健康预筛：过滤掉过载设备(CPU/内存/队列超阈值，复用 IdleDeviceImpl 的阈值)，
+        避免把任务派给濒临 OOM/打满的机器（代价模型的负载项只看"已预留数"，抓不住设备自身已很忙）。
+        受 OPENSAI_HEALTH_FILTER 控制(默认开)。安全兜底：过滤后为空(全部过载)→退回全量，绝不因预筛阻塞放置。"""
+        if not device_info_list:
+            return device_info_list
+        if os.environ.get('OPENSAI_HEALTH_FILTER', '1') in ('0', '', 'false', 'False'):
+            return device_info_list
+        healthy = {}
+        for dno, d in device_info_list.items():
+            try:
+                if IdleDeviceImpl.idle_devices(d):
+                    healthy[dno] = d
+            except Exception:
+                healthy[dno] = d        # 心跳字段不全 -> 不误杀，保留候选
+        if not healthy:
+            logging.warning('[health] 所有设备均过载，资源预筛退回全量(不阻塞放置)')
+            return device_info_list
+        if len(healthy) < len(device_info_list):
+            logging.info(f'[health] 资源预筛: {len(healthy)}/{len(device_info_list)} 台健康设备进入放置')
+        return healthy
+
+    @classmethod
     def offloading_strategy(cls, subtask):
         '''
             抽象出一层内容,将具体的卸载决策放在./offloading_brain里
         '''
         logging.info('making offloading strategy for subtask')
         device_info_list = DeviceServiceImpl.read_device_info()
+        # 6a 资源健康预筛：自动放置只在"未过载"设备中挑（手动指定 direct 不筛，尊重用户钉选）。
+        healthy_list = cls._healthy_devices(device_info_list)
         # 默认 plan（前瞻整图规划）；设备掉线会自动回退贪心。smart=纯贪心自适应；random=对照。
         mode = os.environ.get('OPENSAI_PLACEMENT', 'plan').lower()
         if subtask.get_sub_task_direct_allocate_id() != -1:
-            # 手动指定（directAllocationId>0）：保持原行为不变。
+            # 手动指定（directAllocationId>0）：保持原行为不变，用全量列表（不过滤）。
             device_dict = OffloadingImpl.direct_strategy(device_info_list, subtask)
         elif mode == 'random':
             # 对照实验用：强制随机放置（A/B 对比智能放置的收益）。
-            device_dict = OffloadingImpl.random_strategy(device_info_list, subtask)
+            device_dict = OffloadingImpl.random_strategy(healthy_list, subtask)
         elif mode == 'plan':
             # 前瞻放置：整图反向就近规划（提交后首次放置时规划一次并缓存）。
             task_id = subtask.get_task_id()
             plan = cls.placement_plan.get(task_id)
             if plan is None:
                 decoded = cls.all_task_decoded.get(task_id)
-                plan = OffloadingImpl.plan_dag(decoded, device_info_list, cls.reservations) if decoded else {}
+                plan = OffloadingImpl.plan_dag(decoded, healthy_list, cls.reservations) if decoded else {}
                 cls.placement_plan[task_id] = plan
-            device_dict = device_info_list.get(plan.get(subtask.get_sub_task_id()))
+            device_dict = healthy_list.get(plan.get(subtask.get_sub_task_id()))
             if not device_dict:
-                # 规划的设备已下线/未知 -> 退化为贪心自适应，保证仍能放下去。
+                # 规划的设备已下线/未知/被预筛 -> 退化为贪心自适应，保证仍能放下去。
                 device_dict = OffloadingImpl.locality_strategy(
-                    device_info_list, subtask, cls._predecessor_info(subtask), cls.reservations)
+                    healthy_list, subtask, cls._predecessor_info(subtask), cls.reservations)
         else:
             # T3.1/T3.2 自适应放置：传入前驱(设备,实测产出大小) + 预留账本。
             pred_info = cls._predecessor_info(subtask)
             device_dict = OffloadingImpl.locality_strategy(
-                device_info_list, subtask, pred_info, cls.reservations)
+                healthy_list, subtask, pred_info, cls.reservations)
         if not device_dict:
             # 当前无在线设备：不分配，保持子任务 READY 等待下一轮重试。
             # （旧代码会直接 set_device_from_dict(None) 抛 TypeError，进而杀死整个卸载线程。）
