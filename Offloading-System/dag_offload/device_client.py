@@ -378,7 +378,29 @@ class DeviceClient:
                         logging.info(f"Started new thread to process task: {data_decode['msg']['algo_name']}")
 
                     else:
-                        logging.error(f"[ERR] The receive_msg algorithm is not exist. {data_decode['msg']['algo_name']}")
+                        # 算法不存在/不可用：必须回一条 ERROR 结果，否则该子任务在大脑侧永远在飞——
+                        # DAG 永不收尾、放置预留不释放。回错让子任务被标记完成(结果为 ERROR)，整图正常收敛。
+                        _algo = data_decode['msg']['algo_name']
+                        logging.error(f"[ERR] The receive_msg algorithm is not exist. {_algo}")
+                        try:
+                            _m = data_decode['msg']
+                            err_rsp = {
+                                'dag_subtask_rsp': 'dag_subtask_rsp',
+                                'from_device_no': data_decode['to_device_no'],
+                                'from_device_ip': data_decode['to_device_ip'],
+                                'from_device_port': data_decode['to_device_port'],
+                                'to_device_no': data_decode['from_device_no'],
+                                'to_device_ip': data_decode['from_device_ip'],
+                                'to_device_port': data_decode['from_device_port'],
+                                'msg': {'task_id': _m['task_id'], 'sub_task_id': _m['sub_task_id'],
+                                        'device_no': _m['device_no'], 'finished_time': "",
+                                        'output_bytes': 0, 'metrics': {},
+                                        'result': f"ERROR: 算法不存在或不可用: {_algo}"},
+                            }
+                            if sock.fileno() != -1:
+                                NetworkUtils.send_msg(sock, err_rsp)
+                        except (socket.error, OSError) as e:
+                            logging.warning(f"回送未知算法错误结果失败: {e}")
                 elif NetworkUtils.is_dict(data_decode) and 'artifact_cleanup' in data_decode:
                     # 7a：整图完成，server 通知删除该任务在本机的产物（输出 + 拉取的输入）
                     _tid = data_decode.get('task_id')
