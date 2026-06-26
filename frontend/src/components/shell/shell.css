@@ -1,0 +1,102 @@
+/* ============================================================================
+   App shell — sidebar + top bar + content stage
+   ============================================================================ */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(244, 247, 251, 0.86));
+  backdrop-filter: blur(8px);
+  padding: var(--sp-4) var(--sp-3);
+  gap: var(--sp-2);
+  overflow-y: auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-4);
+}
+.brand .mark {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  display: grid; place-items: center; color: #04121a;
+  background: linear-gradient(150deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 22px -6px var(--accent-glow);
+}
+.brand .name { font-size: var(--fs-lg); font-weight: 700; color: var(--text-hi); letter-spacing: -0.02em; line-height: 1; }
+.brand .tagline { font-size: 10px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--text-faint); margin-top: 3px; }
+
+.nav-group-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--text-faint); padding: var(--sp-3) var(--sp-3) var(--sp-1); font-weight: 700;
+}
+.nav-item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: 9px var(--sp-3); border-radius: var(--r-md);
+  color: var(--text-dim); font-size: var(--fs-md); font-weight: 550; cursor: pointer;
+  border: 1px solid transparent; transition: all var(--dur-fast) var(--ease); position: relative;
+}
+.nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.nav-item.active {
+  background: linear-gradient(90deg, var(--accent-soft), transparent);
+  color: var(--text-hi); border-color: var(--line);
+}
+.nav-item.active::before {
+  content: ""; position: absolute; left: -3px; top: 8px; bottom: 8px; width: 3px;
+  border-radius: var(--r-pill); background: var(--accent); box-shadow: 0 0 10px -1px var(--accent-glow);
+}
+.nav-item .badge { margin-left: auto; }
+.nav-item svg { flex: none; }
+
+.sidebar-foot { margin-top: auto; padding: var(--sp-3); }
+
+/* ---------- Connection chip ---------- */
+.conn-chip {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 9px var(--sp-3); border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--bg-inset); font-size: var(--fs-sm);
+}
+.conn-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.conn-chip .dot.online { background: var(--ok); box-shadow: 0 0 9px var(--ok); animation: pulse-soft 1.8s var(--ease) infinite; }
+.conn-chip .dot.empty { background: var(--warn); box-shadow: 0 0 9px var(--warn); }
+.conn-chip .dot.offline { background: var(--err); box-shadow: 0 0 9px var(--err); }
+.conn-chip .dot.connecting { background: var(--text-faint); animation: pulse-soft 1s linear infinite; }
+.conn-chip .txt { display: flex; flex-direction: column; line-height: 1.25; }
+.conn-chip .txt b { color: var(--text-hi); font-weight: 600; }
+.conn-chip .txt small { color: var(--text-faint); font-size: 10px; }
+
+/* ---------- Main ---------- */
+.main { display: flex; flex-direction: column; min-width: 0; height: 100%; }
+.topbar {
+  height: var(--topbar-h); flex: none;
+  display: flex; align-items: center; gap: var(--sp-4);
+  padding: 0 var(--sp-6); border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(10px); z-index: var(--z-topbar);
+}
+.topbar .page-title { font-size: var(--fs-lg); font-weight: 650; color: var(--text-hi); }
+.topbar .page-sub { font-size: var(--fs-sm); color: var(--text-dim); }
+
+.content { flex: 1; overflow: auto; padding: var(--sp-6); }
+.content.flush { padding: 0; } /* for the full-bleed 3D stage */
+
+.page-head { margin-bottom: var(--sp-5); display: flex; align-items: flex-end; justify-content: space-between; gap: var(--sp-4); }
+.page-head h2 { font-size: var(--fs-xl); }
+.page-head .desc { color: var(--text-dim); font-size: var(--fs-md); margin-top: 4px; max-width: 720px; }
+
+/* demo-mode banner */
+.demo-banner {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-xs); font-weight: 600; color: var(--store);
+  background: var(--warn-soft); border: 1px solid rgba(255,194,75,0.3);
+  padding: 3px 10px; border-radius: var(--r-pill);
+}

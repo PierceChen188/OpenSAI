@@ -1,0 +1,105 @@
+/* ============================================================================
+   OpenSAI design tokens — "light technical / editorial"
+   A single source of truth for the visual language. Components reference these
+   variables only; no raw hex outside this file (keeps the system coherent).
+   ============================================================================ */
+
+:root {
+  /* ---- Surfaces (light, layered by elevation) ---- */
+  --bg-void: #e9edf4;        /* app backdrop, behind everything */
+  --bg-base: #f4f7fb;        /* main canvas */
+  --bg-raised: #ffffff;      /* cards / panels */
+  --bg-raised-2: #f1f5fa;    /* nested surfaces, table headers */
+  --bg-hover: rgba(15, 30, 60, 0.04);
+  --bg-inset: #eef2f8;       /* wells, code, inputs */
+
+  /* ---- Hairlines & borders ---- */
+  --line: rgba(15, 35, 75, 0.12);
+  --line-strong: rgba(15, 35, 75, 0.20);
+  --line-faint: rgba(15, 35, 75, 0.07);
+
+  /* ---- Text ---- */
+  --text-hi: #0f1b2d;        /* primary */
+  --text: #33465f;           /* body */
+  --text-dim: #64748b;       /* secondary */
+  --text-faint: #94a3b8;     /* tertiary / placeholders */
+
+  /* ---- Brand / data accents ---- */
+  --accent: #2563eb;         /* primary — blue */
+  --accent-2: #7c3aed;       /* violet */
+  --accent-soft: rgba(37, 99, 235, 0.10);
+  --accent-glow: rgba(37, 99, 235, 0.30);
+  --violet-soft: rgba(124, 58, 237, 0.12);
+
+  /* ---- Semantic resource hues (used across cards, bars, 3D) ---- */
+  --cpu: #0ea5e9;            /* sky    — compute */
+  --mem: #7c3aed;            /* violet — memory */
+  --bw: #059669;             /* green  — bandwidth */
+  --store: #d97706;          /* amber  — storage */
+
+  /* ---- Status ---- */
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --info: #2563eb;
+  --queued: #64748b;
+  --running: #0ea5e9;
+
+  --ok-soft: rgba(22, 163, 74, 0.12);
+  --warn-soft: rgba(217, 119, 6, 0.13);
+  --err-soft: rgba(220, 38, 38, 0.10);
+  --info-soft: rgba(37, 99, 235, 0.10);
+
+  /* ---- Typography ---- */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, "Cascadia Mono",
+    Menlo, Consolas, monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 26px;
+  --fs-3xl: 34px;
+
+  /* ---- Spacing scale (4px base) ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ---- Radii ---- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* ---- Elevation (soft, light shadows) ---- */
+  --shadow-1: 0 1px 2px rgba(15, 30, 60, 0.06);
+  --shadow-2: 0 8px 24px -12px rgba(15, 30, 60, 0.18);
+  --shadow-3: 0 22px 50px -18px rgba(15, 30, 60, 0.26);
+  --shadow-glow: 0 0 0 1px var(--accent-soft), 0 6px 22px -8px var(--accent-glow);
+
+  /* ---- Motion ---- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 360ms;
+
+  /* ---- Layout ---- */
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+  --z-toast: 1000;
+  --z-overlay: 800;
+  --z-topbar: 100;
+}

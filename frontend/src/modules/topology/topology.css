@@ -1,0 +1,5 @@
+.topo-table { width: 100%; border-collapse: collapse; }
+.topo-table th, .topo-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.topo-table th { color: var(--text-dim); font-weight: 600; font-size: var(--fs-sm); }
+.topo-link { padding: var(--sp-2) var(--sp-3); background: var(--bg-raised-2); border: 1px solid var(--line); border-radius: var(--r-md); }
+.topo-svg { width: 100%; height: auto; max-height: 320px; display: block; }
