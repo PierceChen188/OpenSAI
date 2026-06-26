@@ -184,3 +184,9 @@ docs/ROADMAP.md
 docs/FRONTEND_REQUIREMENTS.md
 docs/ARCHITECTURE_internal.md
 README_internal.md
+# ===== docs: only the tracked software manual PDF is pushed; all other docs are local-only =====
+docs/*
+# ===== local-only (kept on disk, not pushed) =====
+opensai.pdf
+opensai_compressed.pdf
+framework.png

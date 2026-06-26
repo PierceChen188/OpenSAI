@@ -1,4 +1,0 @@
-```{=latex}
-\clearpage
-% TRBEGIN
-```

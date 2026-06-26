@@ -4,7 +4,7 @@ OpenSAI 把一个应用拆成带依赖关系的子任务图（DAG），由中心
 
 平台分三层：**接入层**（定义/提交任务、查询结果）、**智能调度层**（依赖调度、智能放置、资源分配、聚合监测）、**设备执行与网络层**（设备执行、设备间数据面、资源与链路监测）。
 
-> 本文是面向使用者的快速上手指南；系统设计与实现细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+> 本文是面向使用者的快速上手指南；系统设计与实现细节见 [OpenSAI 软件手册](docs/OpenSAI软件手册（含说明文档+测试文档）.pdf)。
 
 ## 平台能力一览
 
@@ -118,7 +118,7 @@ class Algorithm_Foo:
 
 ## 5. 智能放置与资源控制
 
-平台默认即启用智能放置，并可为每个任务分配资源档位，全部由环境变量 / 节点参数控制。机制与实现见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+平台默认即启用智能放置，并可为每个任务分配资源档位，全部由环境变量 / 节点参数控制。机制与实现见 [OpenSAI 软件手册](docs/OpenSAI软件手册（含说明文档+测试文档）.pdf)。
 
 ### 5.1 放置（WHERE：子任务放到哪台设备）
 
@@ -165,7 +165,7 @@ opensai-master/
 ├─ README.md                  ← 本文件（使用指南）
 ├─ scripts/                   ← setup/run/stop/smoke 脚本 + 演示/实验（见 scripts/README.md）
 ├─ docs/
-│   └─ ARCHITECTURE.md        ← 系统架构与实现说明（建议通读）
+│   └─ OpenSAI软件手册（含说明文档+测试文档）.pdf   ← 软件手册（架构 / 实现 / 测试，建议通读）
 └─ Offloading-System/         ← 主系统
     ├─ dag_offload/           ← ★ 入口
     │   ├─ server.py          ←  调度 + 智能放置 + 资源分配 + 分发中枢（TCP，:8888）
@@ -176,7 +176,6 @@ opensai-master/
     │   └─ offloading_brain/  ←  放置决策：plan（前瞻）/ smart（贪心）/ random
     ├─ network/dataplane/     ←  QUIC 设备间数据面（ArtifactServer 发送端 + fetch_blob；限速/出口公平）
     ├─ device/implements/Algorithm_*.py   ← 算法库（含协同感知 FeatureExtract / Fusion）
-    ├─ device/interfaces/resource_control_interface.py  ← 容器化执行后端（可选）
     ├─ predis/                ← Redis 设备注册表 / 服务层
     ├─ task/ result/ config/  ← 任务模型 / 结果模型 / 配置
     └─ requirements*.txt       ← core / -ml / -optional
@@ -191,6 +190,6 @@ opensai-master/
 
 ## 11. 文档
 
-- 系统架构与实现说明：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 系统架构与实现说明：[OpenSAI 软件手册](docs/OpenSAI软件手册（含说明文档+测试文档）.pdf)
 - 脚本 / 演示 / 实验：[scripts/README.md](scripts/README.md)
 - DAG 多节点示例：[Offloading-System/dag_offload/README.md](Offloading-System/dag_offload/README.md)
