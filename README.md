@@ -163,7 +163,7 @@ class Algorithm_Foo:
 ```
 opensai-master/
 ├─ README.md                  ← 本文件（使用指南）
-├─ scripts/                   ← setup/run/stop/smoke 脚本 + 演示/实验（见 scripts/README.md）
+├─ scripts/                   ← setup/run/stop/smoke 脚本 + 演示/实验
 ├─ docs/
 │   └─ OpenSAI软件手册（含说明文档+测试文档）.pdf   ← 软件手册（架构 / 实现 / 测试，建议通读）
 └─ Offloading-System/         ← 主系统
@@ -190,6 +190,4 @@ opensai-master/
 
 ## 11. 文档
 
-- 系统架构与实现说明：[OpenSAI 软件手册](docs/OpenSAI软件手册（含说明文档+测试文档）.pdf)
-- 脚本 / 演示 / 实验：[scripts/README.md](scripts/README.md)
-- DAG 多节点示例：[Offloading-System/dag_offload/README.md](Offloading-System/dag_offload/README.md)
+- 系统架构 / 实现 / 测试说明：[OpenSAI 软件手册](docs/OpenSAI软件手册（含说明文档+测试文档）.pdf)
