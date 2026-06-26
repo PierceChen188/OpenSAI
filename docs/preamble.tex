@@ -1,0 +1,37 @@
+% ---- OpenSAI 架构文档 · XeLaTeX/ctexart 编译用前置宏 ----
+% 章节用文中手写编号(0./1.1…)，关闭 LaTeX 自动编号，避免双重编号；目录深度到三级。
+\setcounter{secnumdepth}{-1}
+\setcounter{tocdepth}{3}
+
+% 模板要求的数学/排版宏包
+\usepackage{mathtools}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{mdframed}
+\usepackage{booktabs}
+\usepackage{pifont}
+\renewcommand{\arraystretch}{1.18}   % 表格行距略放宽，配合逐行横线更易读
+
+% 缺字符号映射到命令(不复用活动字符本身，避免与 microtype 冲突)。
+% 中点·、乘号×等拉丁字体已含，不再映射。
+\usepackage{newunicodechar}
+\newunicodechar{①}{\ding{172}}
+\newunicodechar{②}{\ding{173}}
+\newunicodechar{③}{\ding{174}}
+\newunicodechar{④}{\ding{175}}
+\newunicodechar{⑤}{\ding{176}}
+\newunicodechar{⑥}{\ding{177}}
+\newunicodechar{⑦}{\ding{178}}
+\newunicodechar{⑧}{\ding{179}}
+\newunicodechar{⑨}{\ding{180}}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{↔}{\ensuremath{\leftrightarrow}}
+\newunicodechar{↑}{\ensuremath{\uparrow}}
+\newunicodechar{↓}{\ensuremath{\downarrow}}
+\newunicodechar{✓}{\ensuremath{\checkmark}}
+\newunicodechar{≈}{\ensuremath{\approx}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{α}{\ensuremath{\alpha}}
+\newunicodechar{π}{\ensuremath{\pi}}
