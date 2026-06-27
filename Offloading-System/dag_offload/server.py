@@ -7,7 +7,6 @@ import datetime
 import threading
 import sys
 import os
-from collections import deque
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 将上一级目录添加到Python的模块搜索路径
 from config.logging_config import LOG_FORMAT
@@ -22,6 +21,7 @@ from device.implements.actuator_impl import ActuatorImpl
 from task.bean.sub_task_info import SubTaskInfo
 from offloading_brain.offloading_brain import OffloadingImpl
 from predis.utils.redis_utils import RedisUtils
+from core.event_bus import EventBus
 
 
 class UserServer:
@@ -66,11 +66,9 @@ class UserServer:
     # B1 历史画像：algo_name -> {peak_mem_mb, task_mem_mb, proc_secs, n}（设备 rsp 上报 metrics 后 EWMA）。
     # task_mem_mb=扣掉 worker 基线的「任务边际内存」；供 B4 在开 OPENSAI_AUTO_MEM 时自动定内存档(基线+边际×系数)。
     algo_history = {}
-    # 决策事件流(§14.2)：放置/资源/传输三类结构化事件的环形缓冲，供前端轮询展示"决策过程"。
-    # 只在内存里、有界(防膨胀)；读写用 events_lock 保护(快照与追加可能跨线程)。
-    decision_events = deque(maxlen=400)
-    _event_seq = 0
-    events_lock = threading.Lock()
+    # 决策事件流(§14.2)：放置/资源/传输三类结构化事件，供前端轮询展示"决策过程"。
+    # P1：已抽到独立的 EventBus 模块；下方 _emit_event/_events_snapshot 仅作薄委托，调用方不变。
+    events = EventBus()
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -372,21 +370,13 @@ class UserServer:
 
     @classmethod
     def _emit_event(cls, kind, payload):
-        """追加一条决策事件(放置/资源/传输)到环形缓冲，供前端展示决策过程。容错：异常不影响主流程。"""
-        try:
-            with cls.events_lock:
-                cls._event_seq += 1
-                ev = {'seq': cls._event_seq, 'ts': round(time.time(), 3), 'kind': kind}
-                ev.update(payload)
-                cls.decision_events.append(ev)
-        except Exception as e:
-            logging.debug(f"[event] emit 忽略: {e}")
+        """追加一条决策事件(放置/资源/传输)，供前端展示决策过程。P1：委托给 EventBus。"""
+        cls.events.emit(kind, payload)
 
     @classmethod
     def _events_snapshot(cls):
-        """返回决策事件快照(列表)，供桥接经 eventsInfo 回传前端。"""
-        with cls.events_lock:
-            return list(cls.decision_events)
+        """返回决策事件快照(列表)，供桥接经 eventsInfo 回传前端。P1：委托给 EventBus。"""
+        return cls.events.snapshot()
 
     @classmethod
     def _dev_name(cls, device_info_list, dno):
