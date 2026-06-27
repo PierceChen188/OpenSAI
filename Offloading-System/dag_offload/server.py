@@ -25,6 +25,7 @@ from core.event_bus import EventBus
 from core.monitor_aggregator import MonitorAggregator
 from core.transfer_planner import TransferPlanner
 from core.placement_service import PlacementService
+from core.allocation_service import AllocationService
 
 
 class UserServer:
@@ -317,17 +318,8 @@ class UserServer:
 
     @classmethod
     def _update_algo_history(cls, algo, metrics):
-        """B1：用设备上报的 metrics(EWMA) 更新算法历史画像。"""
-        if not algo or not isinstance(metrics, dict):
-            return
-        h = cls.algo_history.setdefault(algo, {'peak_mem_mb': 0.0, 'task_mem_mb': 0.0,
-                                               'proc_secs': 0.0, 'task_storage_mb': 0.0, 'n': 0})
-        a = 0.5
-        for k in ('peak_mem_mb', 'task_mem_mb', 'proc_secs', 'task_storage_mb'):   # 增记产出存储(供自动定档)
-            v = metrics.get(k)
-            if v:
-                h[k] = float(v) if h['n'] == 0 else a * float(v) + (1 - a) * h[k]
-        h['n'] += 1
+        """B1：用设备上报的 metrics(EWMA) 更新算法历史画像。P5：委托给 AllocationService.update_profile。"""
+        AllocationService.update_profile(cls.algo_history, algo, metrics)
 
     @classmethod
     def _emit_event(cls, kind, payload):
