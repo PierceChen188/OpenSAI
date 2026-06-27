@@ -24,6 +24,7 @@ from predis.utils.redis_utils import RedisUtils
 from core.event_bus import EventBus
 from core.monitor_aggregator import MonitorAggregator
 from core.transfer_planner import TransferPlanner
+from core.placement_service import PlacementService
 
 
 class UserServer:
@@ -83,26 +84,8 @@ class UserServer:
 
     @classmethod
     def _healthy_devices(cls, device_info_list):
-        """6a 资源健康预筛：过滤掉过载设备(CPU/内存/队列超阈值，复用 IdleDeviceImpl 的阈值)，
-        避免把任务派给濒临 OOM/打满的机器（代价模型的负载项只看"已预留数"，抓不住设备自身已很忙）。
-        受 OPENSAI_HEALTH_FILTER 控制(默认开)。安全兜底：过滤后为空(全部过载)→退回全量，绝不因预筛阻塞放置。"""
-        if not device_info_list:
-            return device_info_list
-        if os.environ.get('OPENSAI_HEALTH_FILTER', '1') in ('0', '', 'false', 'False'):
-            return device_info_list
-        healthy = {}
-        for dno, d in device_info_list.items():
-            try:
-                if IdleDeviceImpl.idle_devices(d):
-                    healthy[dno] = d
-            except Exception:
-                healthy[dno] = d        # 心跳字段不全 -> 不误杀，保留候选
-        if not healthy:
-            logging.warning('[health] 所有设备均过载，资源预筛退回全量(不阻塞放置)')
-            return device_info_list
-        if len(healthy) < len(device_info_list):
-            logging.info(f'[health] 资源预筛: {len(healthy)}/{len(device_info_list)} 台健康设备进入放置')
-        return healthy
+        """6a 资源健康预筛。P4：逻辑已抽到 PlacementService.healthy，本方法仅作薄委托。"""
+        return PlacementService.healthy(device_info_list)
 
     @classmethod
     def offloading_strategy(cls, subtask):
