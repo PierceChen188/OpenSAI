@@ -26,21 +26,18 @@ from core.monitor_aggregator import MonitorAggregator
 from core.transfer_planner import TransferPlanner
 from core.placement_service import PlacementService
 from core.allocation_service import AllocationService
+from core.scheduler import Scheduler
 
 
 class UserServer:
     logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
 
-    all_task_dict = {
-        # 'task1': {"time": timestamp, "queue": []},
-        # 可以根据需要添加更多任务队列
-    }
-
-    all_task_decoded = {
-        # 'task1': decoded_info
-    }
-
-    ready_subtask_queue = queue.Queue()
+    # P6a：计算分布化(#3)的 DAG 生命周期状态已由 Scheduler 持有；下列类属性是指向同一对象的别名，
+    # 使既有内联引用零改动（这些对象只被 mutate、不被整体重绑，故别名安全）。
+    scheduler = Scheduler()
+    all_task_dict = scheduler.all_task_dict
+    all_task_decoded = scheduler.all_task_decoded
+    ready_subtask_queue = scheduler.ready_subtask_queue
     data_lock = threading.Lock()
 
     # TCP客户端连接列表 - 用于存储TCP连接
@@ -52,7 +49,7 @@ class UserServer:
     reservations = {}
     # T3.2 自适应放置用：(task_id, node_id) -> 该子任务实测产出字节数（设备在 rsp 中上报）。
     # 放置下游时按前驱真实数据量估传输代价，从而按数据量自动权衡就近↔分散。
-    output_sizes = {}
+    output_sizes = scheduler.output_sizes
     # 前瞻放置(整图反向就近规划)用：task_id -> {node_id: device_no}，提交后首次放置时整图规划一次并缓存。
     placement_plan = {}
     # T3.2 资源档位(阶段A·带宽)：committed_bw[device_no] = 该设备当前已承诺的出口带宽(MB/s)；
@@ -66,7 +63,7 @@ class UserServer:
     storage_reservations = {}   # (task_id, node_id) -> (device_no, storage_mb) 供完成时归还
     # C1 预留泄漏兜底：(task_id, node_id) -> (device_no, 放置时间戳)。完成时移除；超时(任务似已死)由
     # 卸载线程定期回收其放置预留 + 带宽预留，防止设备崩溃后账本永久虚高。
-    inflight = {}
+    inflight = scheduler.inflight
     # B1 历史画像：algo_name -> {peak_mem_mb, task_mem_mb, proc_secs, n}（设备 rsp 上报 metrics 后 EWMA）。
     # task_mem_mb=扣掉 worker 基线的「任务边际内存」；供 B4 在开 OPENSAI_AUTO_MEM 时自动定内存档(基线+边际×系数)。
     algo_history = {}
@@ -76,12 +73,8 @@ class UserServer:
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
-        task_dict = cls.all_task_dict[task_id]
-        task_encoded = cls.all_task_decoded[task_id]
-        for node in task_encoded['dagData']['nodes']:
-            node['result']['status'] = task_dict["queue"][node['id'] - 1].get_subtask_status()
-            node['result']['delay'] = task_dict["queue"][node['id'] - 1].get_subtask_delay()
-            node['result']['deviceId'] = task_dict["queue"][node['id'] - 1].get_subtask_device()
+        """P6a：委托给 Scheduler（操作同一份 DAG 状态）。"""
+        return cls.scheduler.update_decoded_by_dict(task_id)
 
     @classmethod
     def _healthy_devices(cls, device_info_list):
@@ -1061,33 +1054,13 @@ class UserServer:
 
     @classmethod
     def mark_sub_task_status(cls, sub_task: SubTaskInfo):
-        choice = 1
-        if choice == 1:
-            sub_task.set_sub_task_status(SubTaskStatus.FINISH.value)
-        elif choice == 2:
-            sub_task.set_sub_task_status(SubTaskStatus.EARLY_EXIT.value)
-        else:
-            sub_task.set_sub_task_status(SubTaskStatus.DROPPED.value)
-        return sub_task
+        """P6a：委托给 Scheduler。"""
+        return Scheduler.mark_sub_task_status(sub_task)
 
     @classmethod
     def summarize_task_result(cls, task_id: str):
-        subtask_results = []
-        for subtask in cls.all_task_dict[task_id]["queue"]:
-            subtask_result = subtask.get_sub_task_result_by_node()
-            device_id = subtask_result["result"]["deviceId"]
-            if device_id == "Unknown":
-                device_name = "None"
-            else:
-                device_name = DeviceServiceImpl.device_map[device_id] if "deviceId" in subtask_result["result"] else "Unknown"
-            subtask_result["result"]["deviceId"] = device_name
-            subtask_results.append(subtask_result)
-        # 使用入队时已保存的创建时间戳，而不是用硬编码的 task_id[12:] 切片解析
-        # （旧写法假设任务名固定为12字符，任务名长度不同时会算出错误的 finishedTime）。
-        start_time = cls.all_task_dict[task_id]["time"]
-        result_dict = {
-            "dagResult": {"taskName": task_id, "finishedTime": time.time() - start_time, "nodes": subtask_results}}
-        return result_dict
+        """P6a：委托给 Scheduler（操作同一份 DAG 状态）。"""
+        return cls.scheduler.summarize_task_result(task_id)
 
     @classmethod
     def activate_server(cls, host, port):
