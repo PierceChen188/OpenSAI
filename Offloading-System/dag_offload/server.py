@@ -22,6 +22,7 @@ from task.bean.sub_task_info import SubTaskInfo
 from offloading_brain.offloading_brain import OffloadingImpl
 from predis.utils.redis_utils import RedisUtils
 from core.event_bus import EventBus
+from core.monitor_aggregator import MonitorAggregator
 
 
 class UserServer:
@@ -203,34 +204,10 @@ class UserServer:
         """T1.3 server 侧聚合监测视图：把【设备心跳(Redis)】与【大脑自有账本(本 server 进程内存)】
         合并成一份权威快照。关键：放置预留、已承诺出口带宽、在飞任务、算法历史画像都只在 server
         内存里(心跳/Redis 里没有)，所以只有 server 能给出"看资源 + 看决策账本"的完整视图。
-        需在 data_lock 下调用(读 reservations/committed_bw/inflight/algo_history)。"""
+        需在 data_lock 下调用(读 reservations/committed_bw/inflight/algo_history)。P2：构建逻辑已抽到 MonitorAggregator。"""
         devices = DeviceServiceImpl.read_device_info() or {}
-        view_devs = {}
-        for dno, d in devices.items():
-            ct = int(d.get('cores_total') or 0)
-            cc = int(d.get('cores_committed') or 0)
-            view_devs[dno] = {
-                'used_cpu': d.get('used_cpu'),
-                'idle_memory': d.get('idle_memory'), 'total_memory': d.get('total_memory'),
-                'work_status': d.get('work_status', 0), 'worker_slots': d.get('worker_slots', 1),
-                'cores_total': ct, 'cores_committed': cc, 'cores_available': max(0, ct - cc),
-                'mem_committed_mb': d.get('mem_committed_mb', 0), 'delay': d.get('delay', 0),
-                'data_port': d.get('data_port'), 'ip_address': d.get('ip_address'),
-                'observed_links': d.get('observed_links') or {},
-                'storage_total_mb': int(d.get('storage_total_mb') or 0),               # 设备磁盘(心跳)
-                'storage_free_mb': int(d.get('storage_free_mb') or 0),
-                # —— 大脑账本(只在 server 内存、Redis 心跳里没有) ——
-                'placement_reserved': int(cls.reservations.get(dno, 0)),               # T2.1 放置预留
-                'bw_committed_mbps': round(float(cls.committed_bw.get(dno, 0.0)), 2),   # T3.2-A 已承诺出口带宽
-                'storage_committed_mb': round(float(cls.committed_storage_mb.get(dno, 0.0)), 0),  # 已承诺存储档位
-            }
-        return {
-            'devices': view_devs,
-            'inflight_tasks': len(cls.inflight),                # C1 在飞(已派发未完成)子任务数
-            'algo_history': {a: {k: (round(v, 1) if isinstance(v, float) else v)
-                                 for k, v in h.items()} for a, h in cls.algo_history.items()},  # B1 画像
-            'ts': time.time(),
-        }
+        return MonitorAggregator.build_view(devices, cls.reservations, cls.committed_bw,
+                                            cls.committed_storage_mb, cls.inflight, cls.algo_history)
 
     @classmethod
     def _artifact_rate_mbps(cls, sub_task_info, src_device_no, pred_node_id=None):
