@@ -163,14 +163,15 @@ async def _fetch_pooled(host: str, port: int, artifact_id: str, rate_mbps,
 
 
 def fetch_blob(host: str, port: int, artifact_id: str,
-               dest_path: str = None, timeout: float = 120, rate_mbps=None) -> dict:
+               dest_path: str = None, timeout: float = 120, rate_mbps=None, origin=None) -> dict:
     """从 host:port 拉取 artifact_id；若给了 dest_path 则写盘。返回传输统计。
     复用按源设备的 QUIC 长连接（免重复握手）；并发调用在常驻循环上以多 stream 并行。
-    rate_mbps>0 时请求发送端按该速率限速（T5.3）。"""
+    rate_mbps>0 时请求发送端按该速率限速（T5.3）。
+    origin=(ip,port)：直连缺失时告知对端回源拉取（中继代理，WP-07）。旧调用完全兼容。"""
     t0 = time.time()
     loop = _get_loop()
     fut = asyncio.run_coroutine_threadsafe(
-        _fetch_pooled(host, int(port), artifact_id, rate_mbps), loop)
+        _fetch_pooled(host, int(port), artifact_id, rate_mbps, origin=origin), loop)
     data = fut.result(timeout)
     elapsed = time.time() - t0
     if dest_path:
@@ -183,14 +184,34 @@ def fetch_blob(host: str, port: int, artifact_id: str,
 
 
 def fetch_range(host: str, port: int, artifact_id: str, offset: int, length: int,
-                timeout: float = 120, rate_mbps=None, origin=None) -> bytes:
-    """拉取 artifact 的 [offset, offset+length) 字节段并返回原始字节（多链路分条带用）。
+                timeout: float = 120, rate_mbps=None, origin=None, dest_path=None):
+    """拉取 artifact 的 [offset, offset+length) 字节段。
     复用按源设备的长连接；并发调用在常驻循环上以多 stream 并行。
-    origin=(ip,port)：向中继请求时告知回源地址（中继本机没有则去 origin 拉该段）。"""
+    origin=(ip,port)：向中继请求时告知回源地址（中继本机没有则去 origin 拉该段）。
+    dest_path=None：返回原始 bytes（供 fetch_striped 用）；传入路径时按 offset 写盘并返回
+    {bytes,elapsed,dest,offset}（WP-07）。继续透传 rate_mbps/origin。"""
+    t0 = time.time()
     loop = _get_loop()
     fut = asyncio.run_coroutine_threadsafe(
         _fetch_pooled(host, int(port), artifact_id, rate_mbps, int(offset), int(length), origin), loop)
-    return fut.result(timeout)
+    data = fut.result(timeout)
+    if dest_path:
+        d = os.path.dirname(os.path.abspath(dest_path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        off = int(offset or 0)
+        if off == 0:
+            with open(dest_path, 'wb') as f:
+                f.write(data)
+        else:
+            if not os.path.exists(dest_path):
+                with open(dest_path, 'wb') as f:
+                    f.truncate(off)
+            with open(dest_path, 'r+b') as f:
+                f.seek(off)
+                f.write(data)
+        return {'bytes': len(data), 'elapsed': time.time() - t0, 'dest': dest_path, 'offset': off}
+    return data
 
 
 def fetch_striped(sources, artifact_id: str, dest_path: str, total_size: int,

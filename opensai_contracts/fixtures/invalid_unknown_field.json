@@ -1,0 +1,7 @@
+{
+  "name": "unknown_field",
+  "policy": "smart",
+  "nodes": [
+    { "id": 1, "algorithm": "Algorithm_Pi_Calculation", "bogus_field": true }
+  ]
+}

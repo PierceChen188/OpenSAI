@@ -22,6 +22,46 @@ class Scheduler:
         self.output_sizes = {}         # (task_id, node_id) -> 实测产出字节数
         self.inflight = {}             # (task_id, node_id) -> (device_no, 放置时间戳)
 
+        # COM-1.5: 长任务保护 — 任务超时追踪与结果缓存
+        self.task_timeout = {}         # task_id -> deadline timestamp (float)
+        self.result_cache = {}         # task_id -> cached result dict
+        self.DEFAULT_TASK_TTL = 3600   # 默认 DAG 任务最多存活 1 小时
+
+    def register_task(self, task_id: str, ttl: float | None = None):
+        """COM-1.5: Register a task with a deadline."""
+        deadline = time.time() + (ttl if ttl is not None else self.DEFAULT_TASK_TTL)
+        self.task_timeout[task_id] = deadline
+
+    def is_task_expired(self, task_id: str) -> bool:
+        """COM-1.5: Check if a task has exceeded its deadline."""
+        deadline = self.task_timeout.get(task_id)
+        if deadline is None:
+            return False
+        return time.time() > deadline
+
+    def get_task_elapsed(self, task_id: str) -> float:
+        """COM-1.5: Return elapsed seconds since task creation."""
+        task_entry = self.all_task_dict.get(task_id)
+        if task_entry is None:
+            return -1
+        start_time = task_entry.get('time')
+        if start_time is None:
+            return -1
+        return time.time() - start_time
+
+    def cache_result(self, task_id: str, result: dict):
+        """COM-1.5: Cache a completed task result."""
+        self.result_cache[task_id] = result
+
+    def get_cached_result(self, task_id: str) -> dict | None:
+        """COM-1.5: Retrieve a cached result, or None."""
+        return self.result_cache.get(task_id)
+
+    def cleanup_task(self, task_id: str):
+        """COM-1.5: Remove task state after completion or timeout."""
+        self.task_timeout.pop(task_id, None)
+        self.result_cache.pop(task_id, None)
+
     def update_decoded_by_dict(self, task_id):
         task_dict = self.all_task_dict[task_id]
         task_encoded = self.all_task_decoded[task_id]

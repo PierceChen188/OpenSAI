@@ -27,6 +27,10 @@ from core.transfer_planner import TransferPlanner
 from core.placement_service import PlacementService
 from core.allocation_service import AllocationService
 from core.scheduler import Scheduler
+from core.dag_validator import ServerDAGValidator
+from core.cluster_manager import ClusterManager
+from core.job_registry import JobRegistry, IdempotencyConflictError, JobNotFoundError
+from core.server_dag_validator import validate_server_dag
 
 
 class UserServer:
@@ -70,6 +74,8 @@ class UserServer:
     # 决策事件流(§14.2)：放置/资源/传输三类结构化事件，供前端轮询展示"决策过程"。
     # P1：已抽到独立的 EventBus 模块；下方 _emit_event/_events_snapshot 仅作薄委托，调用方不变。
     events = EventBus()
+    # WP-02: 作业注册表（job_id=ULID、幂等、终态不可覆盖、jobQuery）。
+    job_registry = JobRegistry()
 
     @classmethod
     def update_decoded_by_dict(cls, task_id: str):
@@ -725,7 +731,7 @@ class UserServer:
             devices_data.append(device)
         cricle_info = {}
         cricle_info["algorithms"] = ActuatorImpl.read_algorithms()
-        cricle_info["policies"] = ["default"]
+        cricle_info["policies"] = list(ClusterManager.SUPPORTED_POLICIES)  # §2.4.4: plan/smart/random（非 default 占位）
         cricle_info["devices"] = devices_data
         base_info = {key_value: cricle_info}
         # threading.Thread(target=cls.save_history, daemon=True).start()
@@ -835,6 +841,17 @@ class UserServer:
                             print(ActuatorImpl.read_algorithms())
                             logging.info(f"DAG请求报文: {data_decode}")
 
+                            # WP-02: 服务端二次校验（共享 DAGValidator + resource/placement 编排）
+                            algorithms = set(ActuatorImpl.read_algorithms() or [])
+                            ok_srv, err_detail = validate_server_dag(
+                                data_decode, algorithm_whitelist=algorithms)
+                            if not ok_srv:
+                                logging.warning(f"DAG验证失败（服务端）: {err_detail}")
+                                rsp_dict = {"dagRspStatus": False, "error": err_detail}
+                                NetworkUtils.send_msg(client_sock, rsp_dict)
+                                # Don't process further — reject immediately
+                                continue
+
                             # Fix: Handle both string and float timestamps
                             task_create_time = data_decode['dagData']["taskCreateTime"]
 
@@ -854,6 +871,33 @@ class UserServer:
                             alltasks = data_decode['dagData']['nodes']
                             task_queue = []
                             task_id = data_decode['dagData']["taskName"] + str(timestamp)
+
+                            # WP-02: 注册作业（job_id=ULID + 幂等）。task_id 仍作 legacy_task_id，
+                            # 调度流程（all_task_dict/task_dict 的 key）保持不变。
+                            try:
+                                job_record, created = cls.job_registry.register(
+                                    legacy_task_id=task_id,
+                                    dag_data=data_decode.get('dagData'),
+                                    owner=client_id or "",
+                                    idempotency_key=data_decode.get('idempotency_key'),
+                                    request_id=data_decode.get('request_id'),
+                                )
+                            except IdempotencyConflictError as _idem_err:
+                                rsp_dict = {"dagRspStatus": False, "error": _idem_err.to_dict()}
+                                NetworkUtils.send_msg(client_sock, rsp_dict)
+                                continue
+
+                            if not created:
+                                # 幂等命中：作业已注册，不重复调度；仅更新结果投递地址并回执同一 job_id。
+                                logging.info(f"幂等命中：job_id={job_record.job_id}，跳过重复调度")
+                                with data_lock:
+                                    task_dict[task_id] = client_addr
+                                NetworkUtils.send_msg(
+                                    client_sock,
+                                    cls.job_registry.ack_payload(job_record, data_decode.get('request_id')),
+                                )
+                                continue
+
                             with data_lock:
                                 task_dict[task_id] = client_addr
 
@@ -868,10 +912,15 @@ class UserServer:
                                 cls.all_task_dict[task_id]["queue"] = task_queue
                                 cls.all_task_decoded[task_id] = data_decode
                                 logging.info(f"DAG任务加入总任务处理队列")
+                                # COM-1.5: 注册任务超时追踪
+                                cls.scheduler.register_task(task_id)
 
                             cls.update_ready_task(task_queue)
-                            rsp_dict = {"dagRspStatus": True}
-                            NetworkUtils.send_msg(client_sock, rsp_dict)
+                            # WP-02: 回执带 job_id / legacy_task_id / status / accepted_at / request_id
+                            NetworkUtils.send_msg(
+                                client_sock,
+                                cls.job_registry.ack_payload(job_record, data_decode.get('request_id')),
+                            )
 
                         # 处理子任务响应
                         elif 'dag_subtask_rsp' in data_decode:
@@ -911,6 +960,7 @@ class UserServer:
                                     if fin_subtask.get_sub_task_status() == SubTaskStatus.EARLY_EXIT.value:
                                         # subtask 早退，应用任务提早完成
                                         logging.info(f"DAG任务{task_id}提前完成, 将发送结果报文至client")
+                                        cls._mark_job_terminal(task_id, "SUCCEEDED")
                                         result_dict = cls.summarize_task_result(task_id)
                                         # 发送给对应的用户客户端
                                         for username, addr in user_dict.items():
@@ -921,6 +971,7 @@ class UserServer:
                                     elif fin_subtask.get_sub_task_status() == SubTaskStatus.DROPPED.value:
                                         # subtask 被丢弃
                                         logging.info(f"DAG任务{task_id}被丢弃,整体卸载失败，将发送结果报文至client")
+                                        cls._mark_job_terminal(task_id, "FAILED")
                                         result_dict = cls.summarize_task_result(task_id)
                                         # 发送给对应的用户客户端
                                         for username, addr in user_dict.items():
@@ -951,6 +1002,10 @@ class UserServer:
                                             cls.placement_plan.pop(task_id, None)   # 释放前瞻规划缓存
                                             cls._cleanup_task_artifacts(task_id)    # 7a 通知涉及设备删除该任务落盘产物
                                             result_dict = cls.summarize_task_result(task_id)
+                                            # WP-02: 作业标记终态（终态不可覆盖）
+                                            cls._mark_job_terminal(task_id, "SUCCEEDED")
+                                            # COM-1.5: 缓存结果
+                                            cls.scheduler.cache_result(task_id, result_dict)
                                             # 发送给对应的用户客户端
                                             for username, addr in user_dict.items():
                                                 if task_dict[task_id] == addr and username in cls.client_sockets:
@@ -984,6 +1039,26 @@ class UserServer:
                                 if task_dict[task_id] == addr and username in cls.client_sockets:
                                     NetworkUtils.send_msg(cls.client_sockets[username], result_dict)
                                     break
+
+                        # WP-02: 作业查询（控制面 jobQuery，返回 JobResult）
+                        elif 'jobQuery' in data_decode:
+                            q = data_decode.get('jobQuery') or {}
+                            request_id = data_decode.get('request_id')
+                            try:
+                                rec = cls.job_registry.resolve(
+                                    job_id=q.get('job_id'),
+                                    legacy_task_id=q.get('legacy_task_id'),
+                                )
+                                job_result = cls.job_registry.to_job_result(rec.job_id)
+                                rsp = {"job": job_result.to_dict()}
+                                if request_id is not None:
+                                    rsp["request_id"] = request_id
+                                NetworkUtils.send_msg(client_sock, rsp)
+                            except JobNotFoundError as _nf:
+                                rsp = {"error": _nf.to_dict()}
+                                if request_id is not None:
+                                    rsp["request_id"] = request_id
+                                NetworkUtils.send_msg(client_sock, rsp)
 
                         # 处理设备/算法/策略信息请求
                         elif 'devicesInfo' in data_decode or 'algorithmsInfo' in data_decode or 'policiesInfo' in data_decode:
@@ -1061,6 +1136,18 @@ class UserServer:
     def summarize_task_result(cls, task_id: str):
         """P6a：委托给 Scheduler（操作同一份 DAG 状态）。"""
         return cls.scheduler.summarize_task_result(task_id)
+
+    @classmethod
+    def _mark_job_terminal(cls, task_id: str, status: str):
+        """WP-02: 把 legacy task_id 对应作业标记为终态。
+
+        终态不可覆盖由 JobRegistry.transition 保证；重复终态上报抛
+        TerminalStateError，此处忽略（不影响调度线程）。未注册的旧任务安全跳过。
+        """
+        try:
+            cls.job_registry.transition_by_legacy(task_id, status)
+        except Exception as _e:
+            logging.debug(f"[job] 状态更新忽略（可能已终态）: {_e}")
 
     @classmethod
     def activate_server(cls, host, port):

@@ -1,0 +1,29 @@
+{
+  "name": "pi_pipeline",
+  "policy": "smart",
+  "schema_version": "1.0.0",
+  "metadata": { "description": "Two-node sample pipeline." },
+  "nodes": [
+    {
+      "id": 1,
+      "name": "pi",
+      "algorithm": "Algorithm_Pi_Calculation",
+      "version": "1.0",
+      "params": { "count_num": 100000 },
+      "before_nodes": [],
+      "after_nodes": [2],
+      "resources": { "cores": 2, "mem_mb": 2048 },
+      "direct_allocation_id": -1
+    },
+    {
+      "id": 2,
+      "name": "sleep",
+      "algorithm": "Algorithm_Sleep_1",
+      "version": "1.0",
+      "params": { "sleep_time": 1 },
+      "before_nodes": [1],
+      "after_nodes": [],
+      "direct_allocation_id": -1
+    }
+  ]
+}

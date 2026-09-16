@@ -16,6 +16,7 @@ from network.dataplane.quic_server import ArtifactServer
 from network.dataplane.quic_client import fetch_blob, fetch_striped
 from config.dataplane_config import DATA_PORT, ARTIFACTS_DIR
 from dag_offload.task_pool import build_pool, run_task
+from dag_offload.resource_apply import apply_core_ids
 from concurrent.futures.process import BrokenProcessPool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -66,6 +67,7 @@ class DeviceClient:
     worker_slots = 1                  # 并行容量(=进程池 worker 数)；供放置做 capacity-aware 负载
     core_alloc = None                 # T3.2-B CPU 核租借器（activate_client 中按总核数初始化）
     committed_mem_mb = 0              # T3.2-B 当前已承诺内存(MB)，供上报"已承诺/可用"(T1.1)
+    committed_storage_mb = 0          # WP-07 当前已承诺存储(MB)：storage_budget_mb 记账（跑完归还，GC 兜底）
 
     # —— 监测信号（线程间共享，由心跳线程统一上报到 server/Redis）——
     running_tasks = 0                 # 当前正在执行的任务数 -> work_status
@@ -193,11 +195,17 @@ class DeviceClient:
             req_budget = srv_alloc.get('mem_budget_mb', param_dict.get('mem_mb'))
             # 记账用边际占用：预算 > 历史边际预估 > 0。用于 committed_mem 上报(T1.1)，不做硬限。
             acct_mem = int(req_budget or srv_alloc.get('est_mem_mb') or 0)
+            # WP-07 存储档位：storage_budget_mb 为设备端产物配额（记账 + GC 兜底），跑完归还。
+            storage_budget_mb = srv_alloc.get('storage_budget_mb')
             leased_cores = cls.core_alloc.lease(req_cores) if cls.core_alloc else None
             if leased_cores:
-                param_dict['_alloc'] = {'core_ids': leased_cores, 'mem_budget_mb': req_budget}
+                # WP-07：复制完整 srv_alloc（保留 cores/mem_budget_mb/est_mem_mb/storage_budget_mb）
+                # 后追加实际绑核核号 core_ids，不覆盖存储/估算字段（历史 bug：整体重建 _alloc 会丢失）。
+                param_dict['_alloc'] = apply_core_ids(srv_alloc, leased_cores)
             with cls.running_lock:
                 cls.committed_mem_mb += acct_mem
+                if storage_budget_mb:
+                    cls.committed_storage_mb += int(storage_budget_mb)
 
             # 执行算法：优先交给进程池的 worker（控并发+真并行+按档位绑核/限内存，T4.2/T3.2-B）；
             # 池不可用或执行异常则回退到主进程内执行（execute_task），保证仍能正常出结果。
@@ -226,11 +234,13 @@ class DeviceClient:
                 else:
                     result_1 = cls.execute_task(algorithm_name, param_dict, data_dict)
             finally:
-                # 归还核与内存档位
+                # 归还核与内存/存储档位
                 if leased_cores and cls.core_alloc:
                     cls.core_alloc.release(leased_cores)
                 with cls.running_lock:
                     cls.committed_mem_mb = max(0, cls.committed_mem_mb - acct_mem)
+                    if storage_budget_mb:
+                        cls.committed_storage_mb = max(0, cls.committed_storage_mb - int(storage_budget_mb))
             metrics['proc_secs'] = round(time.time() - proc_t0, 2)   # B1 历史画像：本任务执行耗时
 
             # ---- 数据面：登记本节点产出，供后继 device 拉取 ----
@@ -243,6 +253,12 @@ class DeviceClient:
                     out_bytes = 0
             if out_bytes:
                 metrics['task_storage_mb'] = round(out_bytes / (1024 * 1024), 2)   # 产出存储 -> 历史画像(自动定档)
+                # WP-07 产物配额：产出超 storage_budget_mb 告警（软配额，由 GC 兜底，不硬杀）。
+                if storage_budget_mb is not None and out_bytes > int(storage_budget_mb) * 1024 * 1024:
+                    logging.warning(f"[storage] task={task_id} sub={node_id} 产出 {out_bytes} bytes "
+                                    f"超过 storage_budget_mb={storage_budget_mb} MB")
+            if storage_budget_mb is not None:
+                metrics['storage_budget_mb'] = int(storage_budget_mb)   # WP-07：贯通到 ExecutionMetrics
 
             _res_str = str(result_1)
             if _res_str.startswith('ERROR') or _res_str.startswith('MISSING'):

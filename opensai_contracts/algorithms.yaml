@@ -1,0 +1,47 @@
+# OpenSAI versioned algorithm parameter manifest (contract sample).
+#
+# This is the *only* authoritative metadata source for algorithm parameter
+# validation. load_algorithm_registry() reads this file; it never imports
+# algorithm code. Kept deliberately small as a contract example for WP-02+.
+schema_version: "1.0.0"
+algorithms:
+  Algorithm_Pi_Calculation:
+    name: Algorithm_Pi_Calculation
+    version: "1.0"
+    schema_available: true
+    submittable: true
+    parameters:
+      count_num:
+        type: integer
+        required: true
+        minimum: 1
+        description: "Number of iterations used to approximate Pi."
+  Algorithm_MatMul:
+    name: Algorithm_MatMul
+    version: "1.0"
+    schema_available: true
+    submittable: true
+    parameters:
+      size:
+        type: integer
+        required: true
+        minimum: 1
+        description: "Square matrix dimension."
+      dtype:
+        type: string
+        required: false
+        enum: ["float32", "float64"]
+        default: "float32"
+        description: "Numeric precision of the multiplication."
+  Algorithm_Sleep_1:
+    name: Algorithm_Sleep_1
+    version: "1.0"
+    schema_available: true
+    submittable: true
+    parameters:
+      sleep_time:
+        type: number
+        required: false
+        minimum: 0
+        default: 1
+        description: "Seconds to sleep."

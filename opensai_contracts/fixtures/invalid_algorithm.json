@@ -1,0 +1,7 @@
+{
+  "name": "bad_algo",
+  "policy": "smart",
+  "nodes": [
+    { "id": 1, "algorithm": "Algorithm_DoesNotExist" }
+  ]
+}

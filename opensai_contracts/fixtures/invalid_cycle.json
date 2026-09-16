@@ -1,0 +1,8 @@
+{
+  "name": "cycle",
+  "policy": "smart",
+  "nodes": [
+    { "id": 1, "algorithm": "Algorithm_Pi_Calculation", "before_nodes": [2] },
+    { "id": 2, "algorithm": "Algorithm_Sleep_1", "before_nodes": [1] }
+  ]
+}

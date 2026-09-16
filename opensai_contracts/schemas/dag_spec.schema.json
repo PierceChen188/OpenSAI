@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensai.dev/contracts/schemas/dag_spec.schema.json",
+  "title": "OpenSAI public DAG specification (DAGSpec)",
+  "description": "The public SDK DAG structure (snake_case). This is the strict, frozen contract; unknown fields are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "nodes"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable DAG/task name."
+    },
+    "policy": {
+      "type": "string",
+      "enum": ["plan", "smart", "random"],
+      "default": "smart",
+      "description": "Placement policy hint."
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of computation nodes.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "algorithm"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Unique node id, contiguous 1..N."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional human-readable label."
+          },
+          "algorithm": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "description": "Registered algorithm name."
+          },
+          "version": {
+            "type": "string",
+            "default": "1.0",
+            "description": "Algorithm version pin (optional)."
+          },
+          "params": {
+            "type": "object",
+            "default": {},
+            "description": "Algorithm parameters."
+          },
+          "before_nodes": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "default": [],
+            "description": "Ids of nodes that must complete first."
+          },
+          "after_nodes": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "default": [],
+            "description": "Ids of downstream nodes (derived; symmetric with before_nodes)."
+          },
+          "resources": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Optional four-dimension resource hint.",
+            "properties": {
+              "cores": { "type": "integer", "minimum": 1 },
+              "mem_mb": { "type": "integer", "minimum": 1 },
+              "storage_mb": { "type": "integer", "minimum": 1 },
+              "bw_mbps": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          },
+          "direct_allocation_id": {
+            "type": "integer",
+            "default": -1,
+            "description": "-1 = smart placement, >0 = pin to a device index."
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "default": {},
+      "description": "Free-form metadata (never treated as business input)."
+    },
+    "schema_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "description": "Public DAG contract schema version."
+    }
+  }
+}

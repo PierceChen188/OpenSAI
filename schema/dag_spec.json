@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensai.dev/schema/dag_spec.json",
+  "title": "OpenSAI DAG Specification",
+  "description": "Agent-friendly JSON DAG description for OpenSAI computation offloading.",
+  "type": "object",
+  "required": ["taskName", "nodes"],
+  "properties": {
+    "taskName": {
+      "type": "string",
+      "description": "Human-readable name for this DAG task."
+    },
+    "taskPolicy": {
+      "type": "string",
+      "description": "Placement policy hint (e.g. 'default', 'locality', 'spread').",
+      "default": "default"
+    },
+    "taskDesc": {
+      "type": "string",
+      "description": "Optional longer description of the DAG purpose."
+    },
+    "nodes": {
+      "type": "array",
+      "description": "Ordered list of computation nodes forming the DAG.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "algorithm"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Unique node identifier within this DAG (1-based)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional human-readable label for this node."
+          },
+          "algorithm": {
+            "type": "string",
+            "description": "Name of the registered algorithm to execute (e.g. Algorithm_Pi_Calculation).",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "params": {
+            "type": "object",
+            "description": "Parameters to pass to the algorithm's run() method as param_dict.",
+            "default": {}
+          },
+          "dependsOn": {
+            "type": "array",
+            "description": "IDs of nodes that must complete before this node can run (beforeNodes).",
+            "items": {"type": "integer"},
+            "default": []
+          },
+          "resource_hint": {
+            "type": "object",
+            "description": "Optional resource requirements (cores, mem_mb, bw_mbps).",
+            "properties": {
+              "cores": {"type": "integer", "minimum": 1},
+              "mem_mb": {"type": "integer", "minimum": 1},
+              "bw_mbps": {"type": "number", "minimum": 0}
+            }
+          },
+          "directAllocationId": {
+            "type": "integer",
+            "description": "Target device ID: -1 = smart placement, >0 = pin to specific device.",
+            "default": -1
+          }
+        }
+      }
+    }
+  }
+}

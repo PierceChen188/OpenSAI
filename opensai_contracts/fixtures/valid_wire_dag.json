@@ -1,0 +1,41 @@
+{
+  "dagData": {
+    "taskName": "pi_pipeline",
+    "taskId": "1",
+    "taskDesc": "sample",
+    "taskCreateTime": 1700000000.0,
+    "taskPolicy": "default",
+    "nodes": [
+      {
+        "id": 1,
+        "name": "pi",
+        "form": {
+          "beforeNodes": [],
+          "afterNodes": [2],
+          "taskAlgorithm": "Algorithm_Pi_Calculation",
+          "taskVersion": "1.0",
+          "taskInputInfo": { "count_num": 100000, "inDataPath": "./data/", "outDataPath": "./data/" },
+          "details": "",
+          "directAllocationId": -1,
+          "deviceParam": {}
+        },
+        "result": { "taskResultInfo": "", "status": 1, "delay": 0, "deviceId": 0 }
+      },
+      {
+        "id": 2,
+        "name": "sleep",
+        "form": {
+          "beforeNodes": [1],
+          "afterNodes": [],
+          "taskAlgorithm": "Algorithm_Sleep_1",
+          "taskVersion": "1.0",
+          "taskInputInfo": { "sleep_time": 1, "inDataPath": "./data/", "outDataPath": "./data/" },
+          "details": "",
+          "directAllocationId": -1,
+          "deviceParam": {}
+        },
+        "result": { "taskResultInfo": "", "status": 1, "delay": 0, "deviceId": 0 }
+      }
+    ]
+  }
+}
